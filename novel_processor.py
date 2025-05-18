@@ -3,7 +3,7 @@
 
 import os
 import json
-import time  # 虽然在此修改版本中 time 未直接使用，但保留以防未来扩展或其他方法可能需要
+import time  # Ensure time is imported for retry delays
 import re
 import uuid
 from typing import Dict, Any, List, Optional, Tuple  # Tuple 未直接使用，但保留以防未来扩展
@@ -218,7 +218,9 @@ class NovelProcessor:
                     current_chapter_number
                 )
 
-                incremental_analysis_json_str = self._call_llm_for_analysis_raw_json(prompt_for_llm)  # 获取原始JSON字符串
+                # MODIFIED_CODE_START
+                incremental_analysis_json_str = self._call_llm_for_analysis_raw_json(prompt_for_llm)
+                # MODIFIED_CODE_END
 
                 if incremental_analysis_json_str:
                     try:
@@ -287,48 +289,74 @@ class NovelProcessor:
             current_chapter_number=chapter_number_for_context
         )
 
+    # MODIFIED_CODE_START
     def _call_llm_for_analysis_raw_json(self, prompt: str) -> Optional[str]:
         """
         调用LLM进行分析，并期望返回原始JSON字符串。
-        该方法适配 LLMClientInterface 的 generate_chat_completion。
+        增加了重试逻辑和超时设置。
         """
         if not self.llm_client:
             print("LLM客户端未初始化，无法进行分析。")
             return None
 
-        try:
-            messages = [
-                {"role": "system", "content": "你是一个小说分析助手，请严格按照用户要求的格式输出JSON对象。"},
-                {"role": "user", "content": prompt}
-            ]
+        messages = [
+            {"role": "system", "content": "你是一个小说分析助手，请严格按照用户要求的格式输出JSON对象。"},
+            {"role": "user", "content": prompt}
+        ]
 
-            # 假设 llm_client 是 LLMClientInterface 的一个实例
-            model_to_use = self.llm_client.default_model if hasattr(self.llm_client,
-                                                                    'default_model') else "default-model"
-            if not model_to_use and hasattr(self.llm_client, 'model_name'):  # 兼容旧版 LLMClient
-                model_to_use = self.llm_client.model_name
+        model_to_use = self.llm_client.default_model if hasattr(self.llm_client, 'default_model') else "default-model"
+        if not model_to_use and hasattr(self.llm_client, 'model_name'):  # 兼容旧版 LLMClient
+            model_to_use = self.llm_client.model_name
 
-            response_dict = self.llm_client.generate_chat_completion(
-                model=model_to_use,
-                messages=messages,
-                expect_json_in_content=True  # 明确要求LLM返回JSON格式
-            )
+        max_attempts = 3  # 1 初始尝试 + 2 重试
+        timeout_seconds = 150  # 用户要求的超时时间
 
-            if response_dict and "message" in response_dict and "content" in response_dict["message"]:
-                raw_response_content = response_dict["message"]["content"]
-                return raw_response_content
-            elif response_dict and isinstance(response_dict.get("content"), str):  # 兼容直接返回content的API
-                raw_response_content = response_dict.get("content")
-                return raw_response_content
+        for attempt in range(max_attempts):
+            try:
+                print(f"LLM分析调用尝试 {attempt + 1}/{max_attempts} (超时: {timeout_seconds}s)...")
+                response_dict = self.llm_client.generate_chat_completion(
+                    model=model_to_use,
+                    messages=messages,
+                    expect_json_in_content=True,
+                    timeout=timeout_seconds
+                )
+
+                raw_response_content = None
+                if response_dict and "message" in response_dict and "content" in response_dict["message"]:
+                    raw_response_content = response_dict["message"]["content"]
+                elif response_dict and isinstance(response_dict.get("content"), str):  # 兼容直接返回content的API
+                    raw_response_content = response_dict.get("content")
+
+                if raw_response_content:
+                    # 简单检查是否像JSON（不进行完整解析，避免在重试逻辑中重复解析）
+                    stripped_content = raw_response_content.strip()
+                    if stripped_content.startswith("{") and stripped_content.endswith("}"):
+                        print(f"LLM分析调用尝试 {attempt + 1} 成功获取响应。")
+                        return raw_response_content
+                    else:
+                        print(
+                            f"LLM分析调用尝试 {attempt + 1} 返回了非JSON格式或空内容: {raw_response_content[:100]}...")
+                else:
+                    print(f"LLM为分析调用尝试 {attempt + 1} 返回了意外或空响应格式: {response_dict}")
+
+            except Exception as e:
+                # 注意: LLMClientInterface的实现（OllamaClient, GenericOnlineAPIClient）
+                # 通常会捕获它们自己的请求级异常 (如 requests.exceptions.Timeout) 并返回 None。
+                # 这个 except 块主要用于捕获在调用 generate_chat_completion 过程中
+                # 或在其返回后、但在检查内容前发生的其他意外错误。
+                print(f"LLM分析调用尝试 {attempt + 1} 发生错误: {str(e)}")
+                # import traceback # 如果需要更详细的堆栈跟踪
+                # traceback.print_exc()
+
+            if attempt < max_attempts - 1:
+                print(f"等待2秒后重试...")
+                time.sleep(2)  # 在重试前稍作等待
             else:
-                print(f"LLM为分析调用返回了意外的响应格式: {response_dict}")
-                return None
+                print(f"LLM分析调用在 {max_attempts} 次尝试后失败。")
 
-        except Exception as e:
-            print(f"调用LLM进行分析时发生严重错误: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return None
+        return None  # 如果所有尝试都失败，则返回 None
+
+    # MODIFIED_CODE_END
 
     def _ensure_unique_event_ids(self, analysis_doc: Dict[str, Any]) -> Dict[str, Any]:
         """确保分析文档中的所有事件ID都是唯一的。"""
@@ -340,14 +368,11 @@ class NovelProcessor:
         temp_id_to_final_id_map = {}
         new_event_list = []
 
-        # 使用一个临时的集合来跟踪本轮 _ensure_unique_event_ids 调用中已分配的ID，
-        # 以防止在单次调用内生成重复ID（如果UUID生成恰好重复，虽然概率极低）。
-        # self.processed_event_ids 仍然作为全局（跨章节）的已处理ID集合。
         current_run_ids = set()
 
         for event in analysis_doc["detailed_timeline_and_key_events"]:
             if not isinstance(event, dict):
-                new_event_list.append(event)  # 保留非字典项（尽管不应出现）
+                new_event_list.append(event)
                 continue
 
             original_event_id = event.get("event_id")
@@ -357,14 +382,13 @@ class NovelProcessor:
                     isinstance(original_event_id, str) and
                     original_event_id.startswith("E") and
                     len(original_event_id) == 7 and
-                    original_event_id[1:].isalnum()  # 确保E后面是6位字母数字
+                    original_event_id[1:].isalnum()
             )
 
-            # 如果ID不是期望的最终格式，或者虽然是最终格式但已在全局或本次运行中处理过，则生成新的ID
             if not is_final_format_candidate or original_event_id in self.processed_event_ids or original_event_id in current_run_ids:
                 new_uuid_part = uuid.uuid4().hex[:6].upper()
                 final_id = f"E{new_uuid_part}"
-                while final_id in self.processed_event_ids or final_id in current_run_ids:  # 确保新ID的全局和本次运行唯一性
+                while final_id in self.processed_event_ids or final_id in current_run_ids:
                     new_uuid_part = uuid.uuid4().hex[:6].upper()
                     final_id = f"E{new_uuid_part}"
 
@@ -372,7 +396,6 @@ class NovelProcessor:
             self.processed_event_ids.add(final_id)
             current_run_ids.add(final_id)
 
-            # 如果原始ID是临时ID (非E开头) 并且发生了更改，则记录映射关系
             if original_event_id and original_event_id != final_id and not (
                     isinstance(original_event_id, str) and original_event_id.startswith("E")):
                 temp_id_to_final_id_map[original_event_id] = final_id
@@ -381,7 +404,6 @@ class NovelProcessor:
 
         analysis_doc["detailed_timeline_and_key_events"] = new_event_list
 
-        # 更新角色发展中的事件引用ID
         if temp_id_to_final_id_map and "character_profiles" in analysis_doc:
             for char_name, profile in analysis_doc.get("character_profiles", {}).items():
                 if isinstance(profile, dict) and "key_developments" in profile and isinstance(
@@ -400,7 +422,6 @@ class NovelProcessor:
         """
         merged_doc = json.loads(json.dumps(previous_doc))  # 深拷贝
 
-        # 合并 world_setting
         inc_ws = incremental_output.get("world_setting")
         if isinstance(inc_ws, dict):
             base_ws = merged_doc.setdefault("world_setting", {})
@@ -408,12 +429,11 @@ class NovelProcessor:
                 if inc_ws.get(text_field) and isinstance(inc_ws[text_field], str):
                     current_base_text = base_ws.get(text_field, "")
                     base_ws[text_field] = (
-                                current_base_text + "\n" + inc_ws[text_field]).strip() if current_base_text else inc_ws[
+                            current_base_text + "\n" + inc_ws[text_field]).strip() if current_base_text else inc_ws[
                         text_field]
             for list_field in ["rules_and_systems", "key_locations", "major_factions"]:
                 if inc_ws.get(list_field) and isinstance(inc_ws[list_field], list):
                     base_list = base_ws.setdefault(list_field, [])
-                    # 转换为可哈希类型以进行集合操作，适用于简单类型和字典/列表（通过JSON字符串）
                     existing_items_set = set()
                     for item in base_list:
                         if isinstance(item, (dict, list)):
@@ -429,24 +449,20 @@ class NovelProcessor:
                             base_list.append(new_item)
                             existing_items_set.add(new_item_repr)
 
-        # 合并 main_plotline_summary
         inc_plot_summary = incremental_output.get("main_plotline_summary")
         if inc_plot_summary and isinstance(inc_plot_summary, str):
             current_base_summary = merged_doc.get("main_plotline_summary", "")
             chapter_contribution = f"(来自第 {current_chapter_number_context} 章分析): {inc_plot_summary}"
             merged_doc["main_plotline_summary"] = (
-                        current_base_summary + "\n---\n" + chapter_contribution).strip() if current_base_summary else chapter_contribution
+                    current_base_summary + "\n---\n" + chapter_contribution).strip() if current_base_summary else chapter_contribution
 
-        # 合并 detailed_timeline_and_key_events
         inc_events = incremental_output.get("detailed_timeline_and_key_events")
         if isinstance(inc_events, list):
             base_events = merged_doc.setdefault("detailed_timeline_and_key_events", [])
             for new_event_data in inc_events:
                 if isinstance(new_event_data, dict):
                     new_event_data["chapter_approx"] = current_chapter_number_context
-                    # 避免重复添加完全相同的事件 (基于内容，ID会在之后处理)
                     is_duplicate_event = False
-                    # 更宽松的重复检查：如果描述和章节近似相同，则认为是重复（不考虑ID）
                     for existing_event in base_events:
                         if (existing_event.get("description") == new_event_data.get("description") and
                                 existing_event.get("chapter_approx") == new_event_data.get("chapter_approx") and
@@ -456,7 +472,6 @@ class NovelProcessor:
                     if not is_duplicate_event:
                         base_events.append(new_event_data)
 
-        # 合并 character_profiles
         inc_profiles = incremental_output.get("character_profiles")
         if isinstance(inc_profiles, dict):
             base_profiles = merged_doc.setdefault("character_profiles", {})
@@ -465,14 +480,13 @@ class NovelProcessor:
 
                 char_profile_to_update = base_profiles.setdefault(char_name, {})
 
-                # 如果是新角色，或LLM提供了first_appearance_chapter
                 if "first_appearance_chapter" not in char_profile_to_update or inc_profile_data.get(
                         "first_appearance_chapter"):
                     char_profile_to_update["first_appearance_chapter"] = inc_profile_data.get(
                         "first_appearance_chapter", current_chapter_number_context)
 
                 if inc_profile_data.get("description") and isinstance(inc_profile_data["description"], str):
-                    char_profile_to_update["description"] = inc_profile_data["description"]  # 通常是覆盖或补充更新
+                    char_profile_to_update["description"] = inc_profile_data["description"]
 
                 for list_attr in ["personality_traits", "motivations"]:
                     if inc_profile_data.get(list_attr) and isinstance(inc_profile_data[list_attr], list):
@@ -488,17 +502,15 @@ class NovelProcessor:
                     for dev_item in inc_profile_data["key_developments"]:
                         if isinstance(dev_item, dict):
                             dev_item["chapter"] = dev_item.get("chapter", current_chapter_number_context)
-                            # 避免重复的关键发展条目
                             is_duplicate_dev = any(
                                 existing_dev.get("chapter") == dev_item.get("chapter") and
                                 existing_dev.get("event_ref_id") == dev_item.get(
-                                    "event_ref_id") and  # 假设 event_ref_id 此时是LLM给的临时ID
+                                    "event_ref_id") and
                                 existing_dev.get("development_summary") == dev_item.get("development_summary")
                                 for existing_dev in base_dev_list
                             )
                             if not is_duplicate_dev: base_dev_list.append(dev_item)
 
-        # 合并 unresolved_questions_or_themes_from_original
         inc_unresolved = incremental_output.get("unresolved_questions_or_themes_from_original")
         if isinstance(inc_unresolved, list):
             base_unresolved_list = merged_doc.setdefault("unresolved_questions_or_themes_from_original", [])
@@ -517,22 +529,20 @@ class NovelProcessor:
             "chapters_count": len(chapters_data),
             "word_count": sum(len(ch.get("content", "")) for ch in chapters_data),
             "characters": [],
-            "world_building": [],  # 改为列表以支持多条世界观条目
+            "world_building": [],
             "plot_summary": analysis_doc.get("main_plotline_summary", "暂无主要剧情概要。"),
             "themes": analysis_doc.get("unresolved_questions_or_themes_from_original", []),
-            "excerpts": []  # 用于展示关键事件或引人入胜的片段
+            "excerpts": []
         }
 
-        # 提取角色信息
         for char_name, profile_data in analysis_doc.get("character_profiles", {}).items():
             if isinstance(profile_data, dict):
                 desc = profile_data.get("description", "暂无描述。")
                 final_output["characters"].append({
                     "name": char_name,
-                    "description": desc[:200] + "..." if len(desc) > 200 else desc  # 截断描述
+                    "description": desc[:200] + "..." if len(desc) > 200 else desc
                 })
 
-        # 提取世界观信息
         ws_data = analysis_doc.get("world_setting", {})
         if isinstance(ws_data, dict):
             if ws_data.get("overview"):
@@ -564,28 +574,24 @@ class NovelProcessor:
                         ws_data["major_factions"])
                 })
 
-        # 提取一些锚点事件作为精选片段
         anchor_events = [
             event for event in analysis_doc.get("detailed_timeline_and_key_events", [])
             if isinstance(event, dict) and event.get("is_anchor_event")
         ]
-        # 按章节号排序，然后取前几个
         anchor_events.sort(key=lambda x: x.get("chapter_approx", float('inf')))
 
-        for anchor_event in anchor_events[:3]:  # 最多展示3个精选片段
+        for anchor_event in anchor_events[:3]:
             desc = anchor_event.get("description", "锚点事件描述。")
             final_output["excerpts"].append({
                 "chapter": anchor_event.get("chapter_approx", "未知"),
-                "text": desc[:150] + "..." if len(desc) > 150 else desc,  # 截断描述
-                "source_snippet": anchor_event.get("original_text_snippet_ref", "")  # 可以考虑加入原文片段
+                "text": desc[:150] + "..." if len(desc) > 150 else desc,
+                "source_snippet": anchor_event.get("original_text_snippet_ref", "")
             })
 
-        # 如果没有锚点事件，可以尝试从主剧情概要中提取片段，或从章节开头提取
         if not final_output["excerpts"] and chapters_data:
             first_chapter_content = chapters_data[0].get("content", "")
-            # 简单地取第一章的前150个字符作为备用摘录
             excerpt_text = re.sub(r'^\s*(?:第[一二三四五六七八九十百千万零\d]+章.*?|Chapter\s+\d+.*?)\s*\n', '',
-                                  first_chapter_content, count=1)  # 移除可能的标题行
+                                  first_chapter_content, count=1)
             excerpt_text = excerpt_text.strip()[:150]
             if excerpt_text:
                 final_output["excerpts"].append({
