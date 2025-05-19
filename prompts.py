@@ -3,7 +3,8 @@
 
 from typing import Dict, List, Any, Optional
 import json
-# import config # 移除对全局 config 的直接依赖，相关值应通过参数传递
+import config # 导入配置，例如 INITIAL_CONTEXT_CHAPTERS
+
 
 # --- 用于小说分析的提示 (阶段 1.2) ---
 
@@ -35,15 +36,15 @@ def get_novel_analysis_prompt(previous_analysis_summary_json_str: str, current_c
 具体要求如下：
 
 1.  **世界观细节提取 (world_setting)：**
-    * 如果当前章节文本揭示了**新的、先前未记录的**世界观信息（如规则、地点、势力），请在返回的JSON中，于 "world_setting" 对象的相应字段（如 "rules_and_systems", "key_locations", "major_factions"）以列表形式提供这些**纯新增项**。
-    * 如果当前章节文本对 "overview" 有**新的、补充性的**描述，请在 "world_setting" 对象中提供 "overview" 字段，并包含这部分补充文本。
+    *   如果当前章节文本揭示了**新的、先前未记录的**世界观信息（如规则、地点、势力），请在返回的JSON中，于 "world_setting" 对象的相应字段（如 "rules_and_systems", "key_locations", "major_factions"）以列表形式提供这些**纯新增项**。
+    *   如果当前章节文本对 "overview" 有**新的、补充性的**描述，请在 "world_setting" 对象中提供 "overview" 字段，并包含这部分补充文本。
 
 2.  **主剧情线梳理 (main_plotline_summary)：**
-    * 如果当前章节文本对主剧情有重要推进，请在返回的JSON中提供 "main_plotline_summary" 字段，并包含对当前章节关键剧情发展的**补充性总结**。程序会将其追加。
+    *   如果当前章节文本对主剧情有重要推进，请在返回的JSON中提供 "main_plotline_summary" 字段，并包含对当前章节关键剧情发展的**补充性总结**。程序会将其追加。
 
 3.  **时间线与关键事件精确记录 (detailed_timeline_and_key_events)：**
-    * **只输出**那些从【当前章节文本块】中新识别出的、先前未记录在 `<previous_analysis_summary_json_block>` 中的重要事件。
-    * 对于每个新事件，请在返回的JSON的 "detailed_timeline_and_key_events" 列表中提供一个包含以下字段的对象（**你不需要在JSON中输出 `chapter_approx` 字段，程序会自动将其设置为 {current_chapter_number}**）：
+    *   **只输出**那些从【当前章节文本块】中新识别出的、先前未记录在 `<previous_analysis_summary_json_block>` 中的重要事件。
+    *   对于每个新事件，请在返回的JSON的 "detailed_timeline_and_key_events" 列表中提供一个包含以下字段的对象（**你不需要在JSON中输出 `chapter_approx` 字段，程序会自动将其设置为 {current_chapter_number}**）：
         * `event_id`: (string, 请使用 "temp_event_描述性短语" 格式的临时ID，例如 "temp_event_主角发现卷轴")
         * `event_time_readable`: (string, 从当前章节文本中提取的、相对于本章（或合并批次代表章节 {current_chapter_number}）的具体时间信息，如“本章开端”、“三天后上午”、“黄昏时分”。如果无法确定，则使用“本章内某时”。)
         * `original_text_snippet_ref`: (string, 原文中描述此事件的关键句段摘要，不超过100字。)
@@ -52,18 +53,18 @@ def get_novel_analysis_prompt(previous_analysis_summary_json_str: str, current_c
         * `key_characters_involved`: (list of strings, 参与此事件的主要角色名。)
 
 4.  **主要人物信息更新 (character_profiles)：**
-    * 如果当前章节文本中出现了**新的、先前未记录的重要人物**，请在返回的JSON的 "character_profiles" 对象中为他们创建完整的档案结构。其 "first_appearance_chapter" 应为 {current_chapter_number}。
-    * 如果当前章节文本使**已有角色**（存在于 `<previous_analysis_summary_json_block>` 中的角色）发生了关键发展或信息更新：
-        * 请在返回的JSON的 "character_profiles" 对象中包含该角色名作为键。
-        * 对于该角色的值，**只提供需要更新或追加的字段**。例如：
-            * 如果其 "description" 需要更新，则提供新的 "description" 文本。
-            * 为其 "key_developments" 列表追加新的发展条目，新条目中的 "chapter" 应为 {current_chapter_number}，并引用本章相关事件的临时 `event_id`。
-            * 如果 "personality_traits" 或 "motivations" 有新增项，则提供这些新增项的列表。
-            * 如果 "relationships" 有变化，则提供更新后的关系字典。
-        * **不要重复角色档案中未发生变化的信息。**
+    *   如果当前章节文本中出现了**新的、先前未记录的重要人物**，请在返回的JSON的 "character_profiles" 对象中为他们创建完整的档案结构。其 "first_appearance_chapter" 应为 {current_chapter_number}。
+    *   如果当前章节文本使**已有角色**（存在于 `<previous_analysis_summary_json_block>` 中的角色）发生了关键发展或信息更新：
+        *   请在返回的JSON的 "character_profiles" 对象中包含该角色名作为键。
+        *   对于该角色的值，**只提供需要更新或追加的字段**。例如：
+            *   如果其 "description" 需要更新，则提供新的 "description" 文本。
+            *   为其 "key_developments" 列表追加新的发展条目，新条目中的 "chapter" 应为 {current_chapter_number}，并引用本章相关事件的临时 `event_id`。
+            *   如果 "personality_traits" 或 "motivations" 有新增项，则提供这些新增项的列表。
+            *   如果 "relationships" 有变化，则提供更新后的关系字典。
+        *   **不要重复角色档案中未发生变化的信息。**
 
 5.  **未解之谜或主题 (unresolved_questions_or_themes_from_original)：**
-    * 如果当前章节文本引出了**新的、先前未记录的**未解之谜或重要主题，请在返回的JSON的 "unresolved_questions_or_themes_from_original" 列表中提供这些**纯新增项**。
+    *   如果当前章节文本引出了**新的、先前未记录的**未解之谜或重要主题，请在返回的JSON的 "unresolved_questions_or_themes_from_original" 列表中提供这些**纯新增项**。
 
 请确保你的输出是一个结构良好的JSON对象，只包含基于【当前章节文本块】分析得出的新增或具体更新的信息。不要返回完整的全局分析文档。
 例如，如果当前章节没有新的世界观规则，则你的JSON输出中，"world_setting" 下不应包含 "rules_and_systems" 键，或者该键对应一个空列表。
@@ -72,6 +73,7 @@ def get_novel_analysis_prompt(previous_analysis_summary_json_str: str, current_c
 
 
 # --- 叙事引擎的系统提示 (阶段 2.2 及之后) ---
+# (保持不变)
 NARRATIVE_ENGINE_SYSTEM_PROMPT = """
 你的身份是“小说写手”。你的核心任务是严格遵循所提供的【小说原文风格】和【原著核心设定】，逐步撰写和叙述小说的故事情节。
 你将采用全知视角或紧密跟随主角的第三人称视角进行叙述。
@@ -116,33 +118,14 @@ NARRATIVE_ENGINE_SYSTEM_PROMPT = """
 
 
 # --- 用于生成初始叙事的提示 (阶段 2.3) ---
-def get_initial_narrative_prompt(novel_title: str, initial_chapters_text: str,
-                                 relevant_core_settings_summary: str,
-                                 protagonist_initial_state: str,
-                                 current_chapter_number_for_context: int,
-                                 initial_context_chapters: int) -> str: # <--- 添加 initial_context_chapters 参数
-    """
-    生成用于LLM撰写交互式小说开篇的提示。
-
-    Args:
-        novel_title: 小说标题。
-        initial_chapters_text: 小说开篇的原文内容（通常是当前章节及其前后章节）。
-        relevant_core_settings_summary: 与故事开端相关的核心设定摘要。
-        protagonist_initial_state: 主角的初始状态描述（JSON字符串）。
-        current_chapter_number_for_context: 当前故事开始的章节号。
-        initial_context_chapters: 用于确定上下文范围的章节数。
-
-    Returns:
-        生成的提示字符串。
-    """
-    # 计算前后章节数，确保至少为0
-    context_chapters_around = max(0, initial_context_chapters - 1)
-
+# (保持不变)
+def get_initial_narrative_prompt(novel_title: str, initial_chapters_text: str, relevant_core_settings_summary: str,
+                                 protagonist_initial_state: str, current_chapter_number_for_context: int) -> str:
     return f"""
 你现在要开始为用户撰写一部名为《{novel_title}》的交互式小说的开篇。故事将从第 {current_chapter_number_for_context} 章的开端附近开始。
 用户将扮演原著中的主角。
 
-以下是这部小说开篇的原文内容（通常是第 {current_chapter_number_for_context} 章及其前后 {context_chapters_around} 章的内容，具体取决于可获得性）：
+以下是这部小说开篇的原文内容（通常是第 {current_chapter_number_for_context} 章及其前后 {config.INITIAL_CONTEXT_CHAPTERS-1} 章的内容，具体取决于可获得性）：
 <initial_chapters_text_block>
 {initial_chapters_text}
 </initial_chapters_text_block>
@@ -170,6 +153,7 @@ def get_initial_narrative_prompt(novel_title: str, initial_chapters_text: str,
 
 
 # --- 用于叙事继续的用户提示内容 (阶段 3.2) ---
+# (保持不变)
 def get_narrative_continuation_user_prompt_content(
         current_chapter_segment_text: str,
         plot_memory_archive_summary: str,
@@ -222,18 +206,18 @@ if __name__ == "__main__":
     print("\n--- 小说增量分析Prompt示例 ---")
     print(analysis_prompt)
     print("\n--- (结束 小说增量分析Prompt示例) ---")
+    # ... (其他测试保持不变) ...
     print("\n--- 叙事引擎系统Prompt ---")
-    print(NARRATIVE_ENGINE_SYSTEM_PROMPT[:600] + "...") # 截断以避免过长输出
+    print(NARRATIVE_ENGINE_SYSTEM_PROMPT[:600] + "...")
     print("\n--- 初始叙事Prompt示例 ---")
     initial_prompt = get_initial_narrative_prompt(
         novel_title="失落的神器",
         initial_chapters_text="很久很久以前，在一个遥远的村庄... (第一章内容)",
         relevant_core_settings_summary="世界观：魔法与剑。主要人物：艾拉（主角），一个年轻的寻宝者。时间线：故事的开端。",
-        protagonist_initial_state=json.dumps({"name": "艾拉", "location": "溪边村", "time": "春季第一天"}),
-        current_chapter_number_for_context=1,
-        initial_context_chapters=3 # 示例值
+        protagonist_initial_state="主角艾拉，位于溪边村，时间是春季的第一天。",
+        current_chapter_number_for_context=1
     )
-    print(initial_prompt[:700] + "...") # 截断以避免过长输出
+    print(initial_prompt[:700] + "...")
     print("\n--- 叙事继续用户Prompt内容示例 ---")
     continuation_user_content = get_narrative_continuation_user_prompt_content(
         current_chapter_segment_text="周围的森林静悄悄的，只有风吹过树叶的沙沙声。不远处似乎有一条小径。",
@@ -247,5 +231,5 @@ if __name__ == "__main__":
         current_chapter_number_for_context=5,
         planned_reconvergence_info="找到女巫的小屋（原著锚点事件 E007，预计在第7章发生）"
     )
-    print(continuation_user_content[:1000] + "...") # 截断以避免过长输出
+    print(continuation_user_content[:1000] + "...")
     print("\nprompts.py 测试完成。")

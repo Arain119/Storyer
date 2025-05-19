@@ -1,730 +1,627 @@
 # narrative_engine.py
-# 该文件实现了叙事引擎，负责处理用户与小说的交互。
+# 该文件定义了叙事引擎类，负责驱动交互式故事的进展。
 
 import os
 import json
-import time
-import re
-from typing import Dict, Any, List, Optional, Tuple
-import utils
-import prompts  # 确保 prompts 模块被导入
-import traceback  # 引入 traceback
+import re  # 正则表达式库
+from typing import Dict, List, Any, Optional, Tuple
+
+import config  # 导入配置
+import utils  # 导入工具函数
+from llm_client_interface import LLMClientInterface  # 导入LLM客户端接口
+import prompts  # 导入提示工程模块
 
 
 class NarrativeEngine:
-    """叙事引擎类，负责处理用户与小说的交互。"""
+    """
+    叙事引擎类，管理故事的逻辑、与LLM的交互以及会话状态。
+    """
 
-    def __init__(self, llm_client, novel_data_dir: str, chapters_dir: str, analysis_path: str, model_name: str,
-                 saved_state: Optional[Dict[str, Any]] = None):
-        """
-        初始化叙事引擎。
+    def __init__(self,
+                 llm_writer_client: LLMClientInterface,  # 用于写作的LLM客户端
+                 novel_specific_data_dir: str,  # 特定小说的数据目录
+                 chapters_data_path: str,  # 章节数据文件路径
+                 novel_analysis_path: str,  # 小说分析文件路径
+                 writing_model_name: str,  # 写作模型名称
+                 initial_state: Optional[Dict[str, Any]] = None):  # 用于加载的初始状态
+        self.llm_writer_client = llm_writer_client
+        self.novel_specific_data_dir = novel_specific_data_dir
+        self.chapters_data_path = chapters_data_path
+        self.novel_analysis_path = novel_analysis_path
+        self.writing_model_name = writing_model_name
 
-        Args:
-            llm_client: LLM客户端实例。
-            novel_data_dir: 小说数据目录路径。
-            chapters_dir: 章节目录路径。
-            analysis_path: 分析结果文件路径。
-            model_name: 使用的模型名称。
-            saved_state: 可选的保存状态，用于恢复引擎状态。
-        """
-        self.llm_client = llm_client
-        self.novel_data_dir = novel_data_dir
-        self.chapters_dir = chapters_dir
-        self.analysis_path = analysis_path
-        self.model_name = model_name
-        self.session_memory_path = os.path.join(novel_data_dir, 'session_memory.json')
-        self.last_error = None
+        self.session_memory_path = os.path.join(self.novel_specific_data_dir, config.SESSION_MEMORY_FILENAME)
 
-        self.analysis = utils.read_json_file(analysis_path) or {}
-        self.chapters_data = self._load_chapters_data()
+        self.chapters_data: Optional[List[Dict[str, Any]]] = None
+        self.novel_analysis: Optional[Dict[str, Any]] = None
+        self.session_memory: List[Dict[str, Any]] = []
+        self.current_narrative_chapter_index = 0  # 当前叙事所在的章节索引 (0-indexed)
+        self.conversation_history: List[Dict[str, str]] = []
 
-        # 默认值
-        self.session_memory = []
-        self.current_narrative_chapter_index = 0
-        self.conversation_history = []
+        if initial_state:
+            self._load_state(initial_state)
+            print(f"叙事引擎从已保存状态初始化，数据目录: {novel_specific_data_dir}")
+        else:
+            print(f"叙事引擎全新初始化，数据目录: {novel_specific_data_dir}")
 
-        if saved_state:
-            self._load_state(saved_state)
-        # else: # 这些默认值已在上面设置
-        # self.session_memory = []
-        # self.current_narrative_chapter_index = 0
-        # self.conversation_history = []
+    def _load_core_data(self) -> bool:
+        """加载核心数据：章节数据和小说分析数据。"""
+        self.chapters_data = utils.read_json_file(self.chapters_data_path)
+        self.novel_analysis = utils.read_json_file(self.novel_analysis_path)
 
-    def _load_chapters_data(self) -> List[Dict[str, Any]]:
-        """加载章节数据"""
-        chapters_data_path = os.path.join(self.novel_data_dir, 'chapters_data.json')
-        loaded_data = utils.read_json_file(chapters_data_path)
-        if loaded_data and isinstance(loaded_data, list):
-            return loaded_data
+        if not self.chapters_data:
+            print(f"错误：无法从 {self.chapters_data_path} 加载章节数据")
+            return False
+        if not self.novel_analysis:
+            print(f"错误：无法从 {self.novel_analysis_path} 加载小说分析")
+            return False
 
-        print(f"警告: 未找到或无法加载 {chapters_data_path}。尝试从目录结构构建。")
-        chapters_data = []
-        if os.path.exists(self.chapters_dir):
-            try:
-                chapter_files = sorted(
-                    [f for f in os.listdir(self.chapters_dir) if f.startswith('chapter_') and f.endswith('.txt')])
-                for i, file_name in enumerate(chapter_files):
-                    chapter_path = os.path.join(self.chapters_dir, file_name)
-                    chapter_content = utils.read_text_file(chapter_path)
-                    if chapter_content:
-                        num_match = re.search(r'chapter_(\d+)', file_name)
-                        chapter_number_from_file = int(num_match.group(1)) if num_match else i + 1
-                        title_from_content_match = re.search(
-                            r'^(第[一二三四五六七八九十百千万零\d]+章.*?)$|^(Chapter\s+\d+.*?)$',
-                            chapter_content.splitlines()[0] if chapter_content else "", re.MULTILINE)
-                        title = title_from_content_match.group(
-                            0).strip() if title_from_content_match else f"第{chapter_number_from_file}章"
-                        chapters_data.append({
-                            "chapter_number": chapter_number_from_file,
-                            "title": title,
-                            "content": chapter_content,
-                            "path": chapter_path
-                        })
-            except Exception as e:
-                print(f"从目录构建章节数据时出错: {e}")
-        if chapters_data:
-            utils.write_json_file(chapters_data, chapters_data_path)
-            print(f"已从目录结构构建并保存章节数据到 {chapters_data_path}")
-        return chapters_data
-
-    def _load_state(self, state: Dict[str, Any]) -> None:
-        """从保存的状态加载引擎状态"""
-        self.session_memory = state.get("session_memory", [])
-        self.current_narrative_chapter_index = state.get("current_narrative_chapter_index", 0)
-        self.conversation_history = state.get("conversation_history", [])
-        self.model_name = state.get("model_name", self.model_name)
-        # 确保加载的章节索引在有效范围内
-        if not (0 <= self.current_narrative_chapter_index < len(self.chapters_data)) and self.chapters_data:
-            print(f"警告: 从存档加载的章节索引 {self.current_narrative_chapter_index} 无效，重置为0。")
-            self.current_narrative_chapter_index = 0
-        elif not self.chapters_data:  # 如果章节数据为空，也无法定位章节
-            self.current_narrative_chapter_index = 0
-
-        print(f"叙事引擎状态已从存档加载。当前章节索引: {self.current_narrative_chapter_index}, 模型: {self.model_name}")
-        print(f"加载的 session_memory 条目数: {len(self.session_memory)}")
-        print(f"加载的 conversation_history 条目数: {len(self.conversation_history)}")
-
-    def get_state_for_saving(self) -> Dict[str, Any]:
-        """获取当前状态用于保存"""
-        return {
-            "session_memory": self.session_memory,
-            "current_narrative_chapter_index": self.current_narrative_chapter_index,
-            "conversation_history": self.conversation_history,
-            "novel_data_dir": self.novel_data_dir,
-            "chapters_dir": self.chapters_dir,
-            "analysis_path": self.analysis_path,
-            "model_name": self.model_name
-        }
+        for key, default_value in [
+            ("world_setting", {"overview": "", "rules_and_systems": [], "key_locations": [], "major_factions": []}),
+            ("main_plotline_summary", ""),
+            ("detailed_timeline_and_key_events", []),
+            ("character_profiles", {}),
+            ("unresolved_questions_or_themes_from_original", [])
+        ]:
+            if key not in self.novel_analysis:
+                self.novel_analysis[key] = default_value
+        print("核心数据（章节和小说分析）加载成功。")
+        return True
 
     def _get_current_chapter_number(self) -> int:
-        """获取当前叙事索引对应的实际章节号 (通常用于显示)"""
+        """获取当前叙事索引对应的实际章节号 (chapter_number)"""
         if self.chapters_data and 0 <= self.current_narrative_chapter_index < len(self.chapters_data):
             return self.chapters_data[self.current_narrative_chapter_index].get("chapter_number",
-                                                                                self.current_narrative_chapter_index + 1)
-        return self.current_narrative_chapter_index + 1  # Fallback
+                                                                                self.current_narrative_chapter_index + 1)  # 回退到索引+1
+        return self.current_narrative_chapter_index + 1  # 默认回退
 
     def _get_relevant_core_settings_summary(self, current_event_context: Optional[str] = None) -> str:
-        """获取与当前情境相关的核心设定摘要"""
-        if not self.analysis:
-            return "错误：小说分析数据未加载。"
+        """
+        获取与当前情境相关的核心设定摘要，用于提供给LLM。
+        会限制未来信息的泄露。
+        """
+        if not self.novel_analysis or not self.chapters_data:
+            return "错误：小说分析或章节数据未加载。"
         summary_parts = []
-        actual_chapter_num_display = self._get_current_chapter_number()
-        summary_parts.append(f"当前故事焦点章节: 第 {actual_chapter_num_display} 章附近。")
-        world_overview = self.analysis.get("world_building", [])
-        if world_overview and isinstance(world_overview, list) and len(world_overview) > 0:
-            overview_desc = world_overview[0].get("description", "")
-            if overview_desc:
-                summary_parts.append(f"- 世界观概览: {overview_desc[:300]}...")
-        plot_summary_text = self.analysis.get("plot_summary", "")
-        if plot_summary_text:
-            summary_parts.append(f"- 已发生的原著主线概要（节选）: {plot_summary_text[:300]}...")
-        characters_info = self.analysis.get("characters", [])
-        if characters_info:
-            char_summaries = []
-            for char_data in characters_info[:3]:  # 简单取前几个
-                char_summaries.append(
-                    f"{char_data.get('name', '未知角色')}: {char_data.get('description', '暂无描述')[:100]}...")
-            if char_summaries:
-                summary_parts.append(f"- 主要相关角色信息: {'; '.join(char_summaries)}")
-        if self.session_memory:
-            last_mem = self.session_memory[-1]
-            last_observations = last_mem.get("immediate_consequences_and_observations", [])
-            if last_observations:
-                summary_parts.append(f"- 主角最近的观察/经历: {'; '.join(last_observations)[:200]}...")
-        if current_event_context:
-            summary_parts.append(f"- 当前主角面临的情境/决策点: {current_event_context}")
+
+        current_actual_chapter_num = self._get_current_chapter_number()
+        is_initial_phase_restricted = current_actual_chapter_num <= 1  # 假设第0章（序章）和第1章信息受限
+
+        if is_initial_phase_restricted:
+            summary_parts.append(
+                f"- 当前故事阶段: 第 {current_actual_chapter_num} 章开端。你对这个世界的了解非常有限，仅限于你当前所经历和观察到的。请严格根据当前章节的直接信息和你的直接观察行动。不要假设任何当前章节未提及的背景信息或未来事件。")
+            # 在初始阶段，可以提供非常概括的世界观，如果分析中有的话
+            ws_overview = self.novel_analysis.get("world_setting", {}).get("overview", "")
+            if ws_overview:
+                summary_parts.append(f"- 世界观初步印象: {ws_overview[:150]}...")  # 截断以避免过多细节
+        else:
+            summary_parts.append(f"- 当前故事进展至: 第 {current_actual_chapter_num} 章附近。")
+            ws = self.novel_analysis.get("world_setting", {})
+            summary_parts.append(f"- 世界观概览: {ws.get("overview", "未定义")}")
+            if ws.get("rules_and_systems"):
+                summary_parts.append(
+                    f"- 核心规则/系统: {json.dumps(ws.get("rules_and_systems"), ensure_ascii=False, indent=2)}")
+
+            # 主剧情线摘要（可以考虑是否也需要根据进度逐步提供，目前是全局的）
+            summary_parts.append(
+                f"- 主剧情线概要（截至目前）: {self.novel_analysis.get("main_plotline_summary", "未定义")}")
+
+            # 已发生的和即将发生的锚点事件提示
+            # 只显示已发生的事件摘要和非常临近的1-2个未来锚点事件作为模糊提示
+            # TODO: 这里的逻辑可以进一步细化，比如“已发生事件”是否需要全部列出，还是只列出近期的。
+
+            timeline = self.novel_analysis.get("detailed_timeline_and_key_events", [])
+            passed_event_ids_from_memory = {
+                turn.get("divergence_from_original_plot", {}).get("original_timeline_event_ref")
+                for turn in self.session_memory
+                if turn.get("divergence_from_original_plot", {}).get("original_timeline_event_ref")}
+
+            # 筛选已发生的事件 (chapter_approx <= current_actual_chapter_num)
+            # 为了简洁，可能不需要在此处列出所有已发生的事件，LLM应从剧情记忆档案中获取更直接的上下文。
+            # 此处主要关注未来的锚点。
+
+            upcoming_anchors_prompt = []
+            anchor_count = 0
+            for event in timeline:
+                if isinstance(event, dict) and event.get("is_anchor_event"):
+                    event_chapter_approx = event.get("chapter_approx")
+                    event_id = event.get("event_id")
+                    if event_chapter_approx is not None and event_id:
+                        # 只考虑略微超前于当前章节的锚点事件作为“即将发生”的提示
+                        # 例如，只提示接下来1-2章内的锚点，或者只提示下一个未发生的锚点
+                        if event_chapter_approx > current_actual_chapter_num and \
+                                event_id not in passed_event_ids_from_memory and \
+                                event_chapter_approx <= current_actual_chapter_num + config.NARRATIVE_WINDOW_CHAPTER_AFTER + 1:  # 限制在窗口内
+                            upcoming_anchors_prompt.append(
+                                f"{event_id}: {event.get("description", "未知描述")[:30]}... (原著约第 {event_chapter_approx} 章)")
+                            anchor_count += 1
+                            if anchor_count >= 1:  # 最多提示1个非常临近的未来锚点
+                                break
+
+            if upcoming_anchors_prompt:
+                summary_parts.append(
+                    f"- （模糊提示）原著中接下来可能的重要节点参考: {"; ".join(upcoming_anchors_prompt)}")
+            else:
+                summary_parts.append(
+                    "- （模糊提示）原著中接下来可能的重要节点参考: (当前无立即相关的、未发生的近未来锚点事件提示，或已过关键节点)")
+
+        # 角色信息：可以考虑只提供当前已出场或即将出场的角色信息
+        # 这需要 character_profiles 中的角色有 first_appearance_chapter 字段，并且NovelProcessor能正确填充
+        # 为简化，此处暂时不动态筛选角色列表，但这是一个重要的优化方向。
+        # relevant_characters = {}
+        # for char_name, profile in self.novel_analysis.get("character_profiles", {}).items():
+        #     if profile.get("first_appearance_chapter", float('inf')) <= current_actual_chapter_num + 1: # 出现章节 <= 当前+1
+        #         relevant_characters[char_name] = profile # 只取部分profile信息避免过长
+        # if relevant_characters:
+        #     summary_parts.append(f"- 相关人物档案摘要: {json.dumps(relevant_characters, ensure_ascii=False, indent=2, default=lambda o: '<not serializable>')}")
+
+        if current_event_context: summary_parts.append(f"- 当前情境具体提示: {current_event_context}")
         return "\n".join(summary_parts)
 
     def _get_current_chapter_segment_text(self) -> str:
         """获取当前叙事点附近的原文章节片段文本。"""
-        if not self.chapters_data:
-            return "错误：章节数据未加载或为空。"
-        if not (0 <= self.current_narrative_chapter_index < len(self.chapters_data)):
-            print(
-                f"警告: _get_current_chapter_segment_text 中 current_narrative_chapter_index ({self.current_narrative_chapter_index}) 超出范围 [0, {len(self.chapters_data) - 1}]。将尝试使用最后/第一个可用章节。")
-            self.current_narrative_chapter_index = max(0, min(self.current_narrative_chapter_index,
-                                                              len(self.chapters_data) - 1 if self.chapters_data else 0))
+        if not self.chapters_data: return "错误：章节数据未加载。"
+        start_idx = max(0, self.current_narrative_chapter_index - config.NARRATIVE_WINDOW_CHAPTER_BEFORE)
+        end_idx = min(len(self.chapters_data),
+                      self.current_narrative_chapter_index + config.NARRATIVE_WINDOW_CHAPTER_AFTER + 1)
 
-        if not self.chapters_data:  # 再次检查，如果修复后仍然为空
-            return "错误：章节数据为空，无法获取任何章节片段。"
+        segment_chapters = []
+        if start_idx < end_idx:  # 确保索引有效
+            segment_chapters = self.chapters_data[start_idx:end_idx]
+        elif 0 <= self.current_narrative_chapter_index < len(self.chapters_data):  # 如果窗口为0，则取当前章
+            segment_chapters = [self.chapters_data[self.current_narrative_chapter_index]]
+        elif self.chapters_data:  # 极端情况，取最后一章
+            segment_chapters = [self.chapters_data[-1]]
 
-        # 简化窗口逻辑，主要聚焦当前章节，可按需扩展
-        window_before = 1  # 可配置
-        window_after = 1  # 可配置
-        start_idx = max(0, self.current_narrative_chapter_index - window_before)
-        end_idx = min(len(self.chapters_data), self.current_narrative_chapter_index + window_after + 1)
-        segment_chapters_data = self.chapters_data[start_idx:end_idx]
-
-        if not segment_chapters_data:
-            if self.chapters_data:  # 至少有一个章节
-                current_chapter_data = self.chapters_data[self.current_narrative_chapter_index]
-                return f"【原文参考：第 {current_chapter_data.get('chapter_number')} 章 - {current_chapter_data.get('title', '无标题')}】\n{current_chapter_data.get('content', '章节内容缺失')}"
-            return "错误：无法获取任何章节片段。"
-
-        formatted_segments = []
-        for chapter_data in segment_chapters_data:
-            is_current_focus = (chapter_data == self.chapters_data[self.current_narrative_chapter_index])
-            prefix = "【当前故事焦点章节原文】" if is_current_focus else "【上下文参考章节原文】"
-            formatted_segments.append(
-                f"{prefix} (第 {chapter_data.get('chapter_number')} 章: {chapter_data.get('title', '无标题')})\n"
-                f"{chapter_data.get('content', '章节内容缺失')}"
-            )
-        return "\n\n---\n\n".join(formatted_segments)
+        if not segment_chapters: return "错误：无法获取当前章节片段。"
+        return "\n\n---\n\n".join(
+            [f"【原文参考：第 {ch["chapter_number"]} 章 - {ch.get("title", "无标题")}】\n{ch["content"]}" for ch in
+             segment_chapters])
 
     def _initialize_session_memory(self, protagonist_initial_state: Dict[str, Any], initial_narrative_text: str):
-        """初始化会话记忆。这是叙事开始时的第一条记忆。"""
-        actual_chapter_num_display = self._get_current_chapter_number()
+        """
+        初始化会话记忆 (session_memory.json)。
+        """
+        current_actual_chapter_num = self._get_current_chapter_number()
+        initial_event_time = protagonist_initial_state.get("time", f"第 {current_actual_chapter_num} 章开端")
         initial_metadata = {
-            "protagonist_action_summary": "主角开始了他的“穿书”冒险。",
-            "event_time_readable_context": protagonist_initial_state.get("time",
-                                                                         f"第 {actual_chapter_num_display} 章开端"),
-            "immediate_consequences_and_observations": [
-                f"主角身份: {protagonist_initial_state.get('name', '你')}",
-                f"初始地点: {protagonist_initial_state.get('location', '一个未知的地方')}",
-                "故事正式拉开序幕，你发现自己身处一个新的世界...",
-                initial_narrative_text[:100] + "..."
-            ],
-            "character_state_changes": {
-                protagonist_initial_state.get("name", "主角"): {
-                    "mood": "惊奇/困惑 (初始状态)",
-                    "location": protagonist_initial_state.get('location', '未知地点'),
-                    "status_effect": "刚刚穿越"
-                }
-            },
-            "item_changes": {"主角": {"acquired": ["新的记忆"], "lost": []}},
-            "world_state_changes": ["交互式叙事已启动。", f"原著故事线在第 {actual_chapter_num_display} 章附近展开。"],
-            "divergence_from_original_plot": {
-                "level": "无",
-                "original_timeline_event_ref": None,
-                "description_of_divergence": "故事刚刚开始，尚未与原著剧情发生显著交互或偏离。"
-            },
-            "current_chapter_progression_hint": f"已进入原著第 {actual_chapter_num_display} 章的开端部分。"
+            "protagonist_action_summary": "故事开始，主角进入小说世界。",
+            "event_time_readable_context": initial_event_time,
+            "immediate_consequences_and_observations": [f"主角身份: {protagonist_initial_state.get("name", "未知")}",
+                                                        f"初始地点: {protagonist_initial_state.get("location", "未知")}",
+                                                        "故事正式拉开序幕。"],
+            "character_state_changes": {protagonist_initial_state.get("name", "主角"): {"mood": "初始",
+                                                                                        "location": protagonist_initial_state.get(
+                                                                                            "location", "未知")}},
+            "item_changes": {}, "world_state_changes": ["互动叙事已初始化。"],
+            "divergence_from_original_plot": {"level": "无", "original_timeline_event_ref": None,
+                                              "description_of_divergence": "尚未开始与原著剧情的显著交互。"},
+            "current_chapter_progression_hint": f"已进入第 {current_actual_chapter_num} 章开端附近"
         }
-        self.session_memory = [{
-            "turn_id": 0,  # 对于新的会话，turn_id 从0开始
-            "user_input_signal": "SESSION_START",
-            "user_free_text": "开始“穿书”之旅",
-            "generated_narrative_segment": initial_narrative_text,
-            **initial_metadata
-        }]
-        # utils.write_json_file(self.session_memory, self.session_memory_path) # 存档时统一保存
-        print(f"初始会话记忆已创建。")
+        self.session_memory = [{"turn_id": 0, "user_input_signal": "SESSION_START", "user_free_text": "开始穿越体验",
+                                "generated_narrative_segment": initial_narrative_text, **initial_metadata}]
+        utils.write_json_file(self.session_memory, self.session_memory_path)
+        print(f"初始会话记忆已创建于 {self.session_memory_path}")
 
-    def initialize_narrative_session(self, initial_context_chapters: int,
-                                     window_before: int, window_after: int,
-                                     divergence_threshold: float, model_params: Dict[str, Any],
-                                     is_resuming: bool = False) -> Optional[str]:
+    def start_session(self) -> Optional[str]:
         """
-        初始化或恢复叙事会话。
-
-        Args:
-            initial_context_chapters: 用于确定初始上下文范围的章节数 (来自配置)。
-            window_before: (当前未使用，_get_current_chapter_segment_text 中有自己的窗口逻辑)
-            window_after: (当前未使用，同上)
-            divergence_threshold: (当前未使用，用于剧情偏离判断的阈值)
-            model_params: 包含temperature, top_p等的模型参数字典。
-            is_resuming: 如果为True，则尝试从已加载的状态恢复，否则开始新的叙事。
-
-        Returns:
-            初始或最后已知的叙事文本，如果操作失败则返回None。
+        开始一个新的叙事会话。
         """
-        self.last_error = None
-        try:
-            if not self.chapters_data or not self.analysis:
-                self.last_error = "错误：小说章节数据或分析结果未加载，无法开始/恢复叙事。"
-                print(self.last_error)
-                return None
+        print("--- 阶段 2：互动叙事会话初始化 ---")
+        if not self._load_core_data() or not self.novel_analysis or not self.chapters_data:
+            return "系统错误：核心数据加载失败。"
 
-            if is_resuming:
-                print("尝试恢复叙事会话...")
-                if self.session_memory and self.conversation_history:
-                    # 状态已由 __init__ 中的 _load_state 加载。
-                    # 我们需要返回最后一条 AI 的消息给 UI。
-                    last_ai_message = None
-                    for entry in reversed(self.conversation_history):  # 从后往前找最后一条AI的回复
-                        if entry.get("role") == "assistant" or entry.get("role") == "system":  # system 用于最初的系统消息
-                            last_ai_message = entry.get("content")
-                            break
+        novel_title = self.novel_analysis.get("novel_title", "未知小说")
 
-                    if last_ai_message is not None:  # 即使是空字符串也算找到
-                        print(f"成功恢复。最后 AI 消息 (部分): {last_ai_message[:100]}...")
-                        # 引擎已处于正确的加载状态，直接返回最后的消息即可。
-                        return last_ai_message
-                    else:
-                        # 这种情况表示 _load_state 可能正确加载了 session_memory，
-                        # 但 conversation_history 为空或没有 AI/系统消息。
-                        # 这在存档正确的情况下不太可能发生。
-                        print(
-                            "警告: 正在恢复，但在已加载的 conversation_history 中未找到先前的 AI 消息。将尝试重新初始化当前章节。")
-                        # 此处将退回到重新初始化当前章节的逻辑。
+        # 确定初始章节号和相关信息
+        protagonist_name = "主角"
+        first_event_location = "故事开始的地方"
+        # 默认从 chapters_data 的第一条记录（可能是序章或第一章）开始
+        initial_chapter_data = self.chapters_data[0] if self.chapters_data else {"chapter_number": 1,
+                                                                                 "title": "未知开端"}
+        initial_chapter_approx_from_data = initial_chapter_data.get("chapter_number", 1)
+        first_event_time = f"第 {initial_chapter_approx_from_data} 章开端"
+
+        # 尝试从小说分析的时间线的第一个事件获取更精确的初始信息
+        # 但要确保这个事件的章节号是有效的
+        if self.novel_analysis.get("detailed_timeline_and_key_events") and \
+                isinstance(self.novel_analysis["detailed_timeline_and_key_events"], list) and \
+                len(self.novel_analysis["detailed_timeline_and_key_events"]) > 0:
+            first_event_from_analysis = self.novel_analysis["detailed_timeline_and_key_events"][0]
+            if isinstance(first_event_from_analysis, dict):
+                analyzed_chap_approx = first_event_from_analysis.get("chapter_approx")
+
+                # 校验分析得到的章节号是否在 chapters_data 中有效
+                # 章节号到索引的转换：如果章节号从1开始，索引=号-1；如果从0开始，索引=号。
+                # 我们需要找到 chapters_data 中 chapter_number 等于 analyzed_chap_approx 的那条记录
+                target_event_chapter_data = next(
+                    (ch for ch in self.chapters_data if ch.get("chapter_number") == analyzed_chap_approx), None)
+
+                if target_event_chapter_data:  # 如果分析的章节号有效
+                    initial_chapter_approx_from_data = analyzed_chap_approx
+                    if first_event_from_analysis.get("key_characters_involved") and \
+                            first_event_from_analysis["key_characters_involved"][0]:
+                        protagonist_name = first_event_from_analysis["key_characters_involved"][0]
+                    first_event_location = first_event_from_analysis.get("description", first_event_location)
+
+                    event_time_from_analysis_readable = first_event_from_analysis.get("event_time_readable")
+                    if event_time_from_analysis_readable and \
+                            not str(event_time_from_analysis_readable).lower().startswith("第") and \
+                            not str(event_time_from_analysis_readable).lower().startswith("chapter") and \
+                            not str(event_time_from_analysis_readable).lower().startswith("本章"):  # 避免只是重复章节号
+                        first_event_time = event_time_from_analysis_readable
+                    else:  # 如果分析的时间只是章节号或“本章”，则用“开端”
+                        first_event_time = f"第 {initial_chapter_approx_from_data} 章开端"
                 else:
-                    # is_resuming 为 true，但状态未正确加载（例如，存档文件损坏或不完整）。
-                    print("警告: 尝试恢复，但 session_memory 或 conversation_history 为空。将尝试重新初始化当前章节。")
-                    # 此处将退回到重新初始化当前章节的逻辑。
+                    print(
+                        f"警告：小说分析中的第一个事件指定的章节号 ({analyzed_chap_approx}) 在章节数据中未找到或无效。将从实际的第一章开始。")
+                    # 回退到使用 chapters_data 的第一章
+                    initial_chapter_approx_from_data = self.chapters_data[0].get("chapter_number",
+                                                                                 1) if self.chapters_data else 1
+                    first_event_time = f"第 {initial_chapter_approx_from_data} 章开端"
+                    # first_event_location 和 protagonist_name 保持默认或从 self.chapters_data[0] 推断（如果可能）
 
-            # 如果不是恢复模式，或者恢复模式未能找到有效的继续点，则进行初始化。
-            # current_narrative_chapter_index 应该是 __init__ 时或 _load_state 时设置的。
-            print(f"为章节索引 {self.current_narrative_chapter_index} 初始化新的叙事会话。")
-            novel_title = self.analysis.get("title", "未知小说")
+        # 根据确定的 initial_chapter_approx_from_data 设置 current_narrative_chapter_index
+        # 找到 initial_chapter_approx_from_data 在 self.chapters_data 中的索引
+        self.current_narrative_chapter_index = 0  # 默认从0开始
+        if self.chapters_data:
+            for idx, ch_data in enumerate(self.chapters_data):
+                if ch_data.get("chapter_number") == initial_chapter_approx_from_data:
+                    self.current_narrative_chapter_index = idx
+                    break
 
-            # 确保 current_narrative_chapter_index 在有效范围内
-            if not (0 <= self.current_narrative_chapter_index < len(self.chapters_data)):
-                print(
-                    f"警告: current_narrative_chapter_index ({self.current_narrative_chapter_index}) 超出范围。重置为 0。")
-                self.current_narrative_chapter_index = 0
-                if not self.chapters_data:  # 如果章节数据本身就为空
-                    self.last_error = "错误：章节数据为空，无法初始化叙事。"
-                    print(self.last_error)
-                    return None
+        # 获取用于LLM提示的初始章节文本，基于修正后的 current_narrative_chapter_index
+        # initial_chapters_for_prompt 将由 _get_current_chapter_segment_text 动态获取，所以这里不需要单独准备
+        # 我们需要的是 _get_current_chapter_segment_text 能够正确使用 current_narrative_chapter_index
+        # 以及 config.INITIAL_CONTEXT_CHAPTERS 的概念融入到 NARRATIVE_WINDOW_CHAPTER_AFTER/BEFORE
+        # 为了简化，初始叙事将使用由 _get_current_chapter_segment_text 决定的上下文窗口
+        initial_chapters_text_for_llm_prompt = self._get_current_chapter_segment_text()
 
-            current_chapter_data = self.chapters_data[self.current_narrative_chapter_index]
-            actual_chapter_num_for_prompt = current_chapter_data.get("chapter_number",
-                                                                     self.current_narrative_chapter_index + 1)
+        protagonist_initial_state_for_prompt = f"主角: {protagonist_name}, 地点: {first_event_location}, 时间: {first_event_time}"
 
-            protagonist_name = "你"  # 默认名
-            if self.analysis.get("characters") and len(self.analysis["characters"]) > 0:
-                main_char_name_candidate = self.analysis["characters"][0].get("name")
-                if main_char_name_candidate: protagonist_name = main_char_name_candidate
+        # 获取当前实际章节号，用于提示
+        current_actual_chapter_num_for_context = self._get_current_chapter_number()
 
-            protagonist_initial_state_info = {  # 用于生成提示
-                "name": protagonist_name,
-                "location": f"原著第 {actual_chapter_num_for_prompt} 章的场景附近",
-                "time": f"第 {actual_chapter_num_for_prompt} 章"  # 简化时间表示
-            }
+        relevant_settings_summary = self._get_relevant_core_settings_summary(
+            current_event_context=f"故事从 {first_event_time} (即第 {current_actual_chapter_num_for_context} 章开端) 开始，初始事件大致为：{first_event_location}"
+        )
+        initial_llm_user_prompt_content = prompts.get_initial_narrative_prompt(
+            novel_title=novel_title,
+            initial_chapters_text=initial_chapters_text_for_llm_prompt,  # 使用窗口文本
+            relevant_core_settings_summary=relevant_settings_summary,
+            protagonist_initial_state=protagonist_initial_state_for_prompt,
+            current_chapter_number_for_context=current_actual_chapter_num_for_context
+        )
+        initial_narrative_messages = [{"role": "user", "content": initial_llm_user_prompt_content}]
 
-            initial_chapters_text_for_llm = self._get_current_chapter_segment_text()
-            relevant_settings_summary_for_llm = self._get_relevant_core_settings_summary(
-                current_event_context=f"故事从《{novel_title}》第 {actual_chapter_num_for_prompt} 章的场景展开。"  # 动态上下文
-            )
+        print(
+            f"请求LLM ({self.llm_writer_client.client_type} - {self.writing_model_name}) 生成初始纯叙事文本 (基于第 {current_actual_chapter_num_for_context} 章上下文)...")
+        llm_response = self.llm_writer_client.generate_chat_completion(
+            self.writing_model_name, initial_narrative_messages, stream=False, expect_json_in_content=False
+        )
+        initial_narrative_text = None
+        if llm_response and llm_response.get("message") and isinstance(llm_response["message"].get("content"), str):
+            raw_text_from_llm = llm_response["message"]["content"].strip()
+            initial_narrative_text, _ = utils.extract_narrative_and_metadata(raw_text_from_llm)
+            if not initial_narrative_text: initial_narrative_text = raw_text_from_llm
 
-            initial_prompt_for_llm = prompts.get_initial_narrative_prompt(
-                novel_title=novel_title,
-                initial_chapters_text=initial_chapters_text_for_llm,
-                relevant_core_settings_summary=relevant_settings_summary_for_llm,
-                protagonist_initial_state=json.dumps(protagonist_initial_state_info, ensure_ascii=False),
-                current_chapter_number_for_context=actual_chapter_num_for_prompt,
-                initial_context_chapters=initial_context_chapters
-            )
-
-            print(f"发送给LLM的初始叙事提示 (部分):\n{initial_prompt_for_llm[:500]}...")
-            initial_narrative_text = self._call_llm_for_narrative(initial_prompt_for_llm, model_params)
-
-            if not initial_narrative_text:  # 如果LLM调用失败
-                self.last_error = self.last_error or "LLM未能生成初始叙事文本。"
-                print(f"生成初始叙事失败。{self.last_error}")
-                return None
-
-            print(f"LLM生成的初始叙事 (部分):\n{initial_narrative_text[:300]}...")
-
-            # 既然是（重新）初始化，就需要设置 session_memory 和 conversation_history
-            self._initialize_session_memory(protagonist_initial_state_info, initial_narrative_text)
-            self.conversation_history = [{  # 重置对话历史，以新生成的叙事开始
-                "role": "system",  # 或 "assistant"
-                "content": initial_narrative_text,
-                "timestamp": time.time()
-            }]
-
+        if initial_narrative_text:
+            print("LLM已生成初始叙事文本。")
+            protagonist_state_for_memory = {"name": protagonist_name, "location": first_event_location,
+                                            "time": first_event_time}
+            self._initialize_session_memory(protagonist_state_for_memory, initial_narrative_text)
+            self.conversation_history = [
+                {"role": "system", "content": prompts.NARRATIVE_ENGINE_SYSTEM_PROMPT},
+                {"role": "assistant", "content": initial_narrative_text}
+            ]
+            print("--- 阶段 2 成功完成 ---")
             return initial_narrative_text
+        else:
+            error_msg = f"系统错误：无法从LLM ({self.writing_model_name}) 获取初始叙事文本。响应: {llm_response}"
+            print(error_msg)
+            return error_msg
 
-        except Exception as e:
-            self.last_error = f"初始化/恢复叙事会话时发生严重异常: {str(e)}"
-            print(self.last_error)
-            traceback.print_exc()
-            return None
-
-    def _call_llm_for_narrative(self, prompt_text: str, model_params: Dict[str, Any]) -> Optional[str]:
-        """辅助方法，调用LLM生成初始叙事文本。"""
-        if not self.llm_client:
-            self.last_error = "LLM客户端未初始化。"
-            print(self.last_error)
-            return None
-        messages = [{"role": "user", "content": prompt_text}]
-        try:
-            response_dict = self.llm_client.generate_chat_completion(
-                model=self.llm_client.default_model,  # 使用客户端的默认模型
-                messages=messages,
-                options=model_params
-            )
-            if response_dict and response_dict.get("message") and response_dict.get("message").get(
-                    "content") is not None:
-                return response_dict["message"]["content"]
-            else:
-                self.last_error = f"LLM叙事调用返回空或无效响应: {response_dict}"
-                print(self.last_error)
-                return None
-        except Exception as e:
-            self.last_error = f"LLM叙事调用时出错: {str(e)}"
-            print(self.last_error)
-            traceback.print_exc()
-            return None
-
-    def process_user_action(self, user_action: str, model_params: Dict[str, Any]) -> Optional[str]:
-        """处理用户行动。"""
-        self.last_error = None
-        try:
-            if not user_action.strip():
-                self.last_error = "用户行动不能为空。"
-                print(self.last_error)
-                return None
-
-            # 将用户行动加入对话历史 (在调用LLM之前)
-            self.conversation_history.append({
-                "role": "user",
-                "content": user_action,
-                "timestamp": time.time()
-            })
-
-            current_chapter_segment_for_llm = self._get_current_chapter_segment_text()
-            plot_memory_summary_for_llm = self._get_plot_memory_summary()
-
-            protagonist_name_for_context = "主角"
-            if self.session_memory:
-                last_char_states = self.session_memory[-1].get("character_state_changes", {})
-                # 尝试获取主角名，如果用 "主角" 作为键
-                if "主角" in last_char_states and "name" in last_char_states["主角"]:
-                    protagonist_name_for_context = last_char_states["主角"]["name"]
-                # 或者，如果键是实际角色名
-                elif self.analysis and self.analysis.get("characters"):
-                    first_char_name = self.analysis["characters"][0].get("name") if self.analysis[
-                        "characters"] else None
-                    if first_char_name and first_char_name in last_char_states:
-                        protagonist_name_for_context = first_char_name
-
-            core_settings_summary_for_llm = self._get_relevant_core_settings_summary(
-                current_event_context=f"主角({protagonist_name_for_context})的最新行动是: '{user_action[:50]}...'"
-            )
-
-            actual_current_chapter_num_display = self._get_current_chapter_number()
-            planned_reconvergence_info_for_llm = None  # 可按需实现
-
-            # 构建LLM的messages，包含系统提示和用户提示内容
-            # 注意：Ollama API 通常期望 messages 列表交替出现 user 和 assistant 角色。
-            # 如果 conversation_history 已经包含了之前的交互，我们可能需要用它来构建 messages。
-            # 简化：暂时只用最新的系统提示 + 当前用户行动构成的用户提示。
-            # 更完善的做法是传递最近几轮的 self.conversation_history (格式化为LLM期望的列表)
-
-            llm_messages_for_continuation = []
-            llm_messages_for_continuation.append({"role": "system", "content": prompts.NARRATIVE_ENGINE_SYSTEM_PROMPT})
-
-            # 添加部分历史对话作为上下文 (如果存在)
-            # 取最近 N 条消息，确保 user/assistant 交替
-            history_context_count = 4  # 例如取最近4条 (2轮对话)
-            relevant_history = self.conversation_history[-(history_context_count + 1):-1]  # 不包括当前用户输入
-            for hist_entry in relevant_history:
-                if hist_entry.get("role") in ["user", "assistant", "system"]:  # system 可能是开篇
-                    llm_messages_for_continuation.append({"role": hist_entry["role"], "content": hist_entry["content"]})
-
-            user_prompt_content = prompts.get_narrative_continuation_user_prompt_content(
-                current_chapter_segment_text=current_chapter_segment_for_llm,
-                plot_memory_archive_summary=plot_memory_summary_for_llm,
-                core_settings_summary_for_current_context=core_settings_summary_for_llm,
-                user_action=user_action,  # 用户最新的行动已通过上面加入到 conversation_history
-                current_chapter_number_for_context=actual_current_chapter_num_display,
-                planned_reconvergence_info=planned_reconvergence_info_for_llm
-            )
-            llm_messages_for_continuation.append({"role": "user", "content": user_prompt_content})
-
-            print(f"发送给LLM的叙事继续用户提示内容 (部分):\n{user_prompt_content[:500]}...")
-
-            if not self.llm_client:
-                self.last_error = "LLM客户端未初始化。"
-                print(self.last_error)
-                return None
-
-            llm_response_dict = self.llm_client.generate_chat_completion(
-                model=self.llm_client.default_model,  # 使用客户端的默认模型
-                messages=llm_messages_for_continuation,  # 传递构建好的消息列表
-                options=model_params
-            )
-
-            if not llm_response_dict or not llm_response_dict.get("message") or llm_response_dict.get("message").get(
-                    "content") is None:
-                self.last_error = self.last_error or f"LLM未能生成有效的叙事响应。响应: {llm_response_dict}"
-                print(self.last_error)
-                # 从 conversation_history 中移除刚才添加的用户行动，因为处理失败了
-                if self.conversation_history and self.conversation_history[-1].get("role") == "user":
-                    self.conversation_history.pop()
-                return None
-
-            raw_llm_output = llm_response_dict["message"]["content"]
-            narrative_text, metadata_json = self._extract_narrative_and_metadata(raw_llm_output)
-
-            if narrative_text is None and metadata_json is None:  # 如果提取完全失败
-                narrative_text = raw_llm_output  # 将整个输出视为叙事
-                print("警告: 未能从LLM输出中分离元数据JSON，将整个输出视为叙事文本。")
-            elif narrative_text is None and metadata_json is not None:  # 只有元数据，没有叙事
-                self.last_error = "LLM仅返回元数据，没有叙事文本。"
-                print(self.last_error)
-                if self.conversation_history and self.conversation_history[-1].get("role") == "user":
-                    self.conversation_history.pop()
-                return None
-
-            print(f"LLM生成的叙事文本 (部分):\n{narrative_text[:300] if narrative_text else '无叙事文本'}...")
-            if metadata_json:
-                print(
-                    f"LLM生成的元数据JSON (部分):\n{json.dumps(metadata_json, ensure_ascii=False, indent=2)[:300]}...")
-
-            self._update_session_memory(user_action, narrative_text, metadata_json)
-
-            # 将AI的回复加入对话历史
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": narrative_text,
-                "timestamp": time.time()
-            })
-
-            self._check_and_advance_chapter(metadata_json)
-
-            return narrative_text
-        except Exception as e:
-            self.last_error = f"处理用户行动时发生严重错误: {str(e)}"
-            print(self.last_error)
-            traceback.print_exc()
-            # 尝试从 conversation_history 中移除刚才添加的用户行动
-            if self.conversation_history and self.conversation_history[-1].get("role") == "user":
-                try:
-                    self.conversation_history.pop()
-                except IndexError:
-                    pass  # 如果列表已空
-            return None
-
-    def _extract_narrative_and_metadata(self, raw_output: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-        """从LLM的原始输出中分离叙事文本和元数据JSON。"""
-        narrative_text = raw_output
-        metadata_json = None
-        try:
-            start_marker = "[NARRATIVE_METADATA_JSON_START]"
-            end_marker = "[NARRATIVE_METADATA_JSON_END]"
-
-            # 尝试找到最后一个标记对，以应对LLM可能重复输出标记的情况
-            start_index = raw_output.rfind(start_marker)
-
-            if start_index != -1:
-                # 从start_index之后开始查找end_marker
-                end_index = raw_output.find(end_marker, start_index + len(start_marker))
-
-                if end_index != -1 and end_index > start_index:
-                    json_str = raw_output[start_index + len(start_marker):end_index].strip()
-                    narrative_text_before_marker = raw_output[:start_index].strip()
-
-                    # 检查标记之后是否还有文本，这通常不应该发生
-                    narrative_text_after_marker = raw_output[end_index + len(end_marker):].strip()
-                    if narrative_text_after_marker:
-                        print(f"警告: 在元数据结束标记之后发现额外文本: '{narrative_text_after_marker[:50]}...'")
-                        # 决定如何处理：可以附加到叙事文本，或忽略
-                        # 为简单起见，我们主要关注标记之前的部分作为叙事
-
-                    narrative_text = narrative_text_before_marker
-
-                    try:
-                        metadata_json = json.loads(json_str)
-                    except json.JSONDecodeError as je:
-                        print(f"解析从LLM提取的元数据JSON失败: {je}")
-                        print(f"原始JSON字符串块: {json_str}")
-                        metadata_json = None  # 解析失败，则元数据为None
-                        # 此时 narrative_text 仍然是标记之前的部分
-                else:
-                    # 找到了开始标记但未找到有效的结束标记
-                    print("警告: 找到了元数据JSON开始标记但未找到有效的结束标记。整个输出可能都是叙事。")
-                    narrative_text = raw_output  # 保守地将整个输出视为叙事
-                    metadata_json = None
-            else:
-                # 没有找到开始标记，整个输出被视为叙事
-                narrative_text = raw_output
-                metadata_json = None
-
-        except Exception as e:
-            print(f"提取叙事和元数据时出错: {e}")
-            # 发生未知错误，保守返回原始输出作为叙事，元数据为None
-            return raw_output, None
-
-        return narrative_text if narrative_text and narrative_text.strip() else None, metadata_json
-
-    def _get_plot_memory_summary(self) -> str:
-        """从 session_memory 构建剧情记忆档案摘要，供LLM参考。"""
+    def _update_session_memory_entry(self, turn_id: int, user_action: str, narrative_text: str,
+                                     metadata: Dict[str, Any]):
+        """
+        更新会话记忆 (session_memory.json) 中的条目。
+        """
+        current_actual_chapter_num = self._get_current_chapter_number()
         if not self.session_memory:
-            return "剧情刚刚开始，尚无重要记忆。"
+            self._initialize_session_memory(
+                {"name": "主角", "location": "未知", "time": f"第 {current_actual_chapter_num} 章"},
+                "错误：会话记忆未初始化前的叙事。")
 
-        memories_to_summarize = self.session_memory[-3:]  # 取最近3轮的“记忆点”
-        summary_entries = []
+        default_divergence = {"level": "未知", "original_timeline_event_ref": None,
+                              "description_of_divergence": "AI未提供分析"}
+        event_time = metadata.get("event_time_readable_context", f"第 {current_actual_chapter_num} 章附近")
+        if not event_time or event_time.lower() in ["未知时间", "时间推移 (ai未明确)"]:
+            event_time = f"第 {current_actual_chapter_num} 章附近 (AI未明确具体时间)"
 
-        for i, mem_entry in enumerate(memories_to_summarize):
-            turn_id = mem_entry.get("turn_id", "未知回合")
-            # user_action = mem_entry.get("user_free_text", "无用户行动记录") # 这是原始输入
-            action_summary = mem_entry.get("protagonist_action_summary", "行动摘要缺失")  # 这是LLM理解的行动
-            narrative_segment = mem_entry.get("generated_narrative_segment", "叙事片段缺失")
-            consequences = mem_entry.get("immediate_consequences_and_observations", [])
-            time_context = mem_entry.get("event_time_readable_context", "时间未知")
-
-            entry_str = f"记忆点 {turn_id} ({time_context}):\n"
-            # if user_action != "开始“穿书”之旅" and user_action != "开始穿越体验": # 避免冗余
-            entry_str += f"  主角行动概要: {action_summary[:100]}...\n"
-            entry_str += f"  剧情发展/AI叙述: {narrative_segment[:150]}...\n"
-            if consequences:
-                entry_str += f"  主要后果/观察: {'; '.join(map(str, consequences))[:150]}...\n"  # 确保是字符串
-            summary_entries.append(entry_str)
-
-        if not summary_entries:
-            return "最近无重要剧情发展。"  # 如果筛选后为空
-
-        return "最近的剧情记忆回顾：\n" + "\n---\n".join(summary_entries)
-
-    def _update_session_memory(self, user_action: str, generated_narrative: str,
-                               llm_metadata: Optional[Dict[str, Any]] = None) -> None:
-        """更新会话记忆。"""
-        turn_id = len(self.session_memory)  # 新的记忆点ID
-
-        if not llm_metadata or not isinstance(llm_metadata, dict):
-            print("警告: LLM未提供有效的元数据，将生成基础元数据。")
-            actual_current_chapter_num_display = self._get_current_chapter_number()
-            prev_time_context = f"第 {actual_current_chapter_num_display} 章内某时"
-            if self.session_memory:  # 如果已有记忆，尝试获取上一条的时间
-                prev_time_context = self.session_memory[-1].get("event_time_readable_context", prev_time_context)
-
-            llm_metadata = {  # 构造一个默认的元数据结构
-                "protagonist_action_summary": user_action[:80] + "..." if len(user_action) > 80 else user_action,
-                "event_time_readable_context": f"{prev_time_context}之后不久",
-                "immediate_consequences_and_observations": [
-                    generated_narrative[:100] + "..."] if generated_narrative else ["叙事为空"],
-                "character_state_changes": {}, "item_changes": {},
-                "world_state_changes": ["剧情因主角行动而推进。"],
-                "divergence_from_original_plot": {
-                    "level": "未知", "original_timeline_event_ref": None,
-                    "description_of_divergence": "由于缺少LLM元数据，偏离情况未知。"
-                },
-                "current_chapter_progression_hint": f"在第 {actual_current_chapter_num_display} 章中继续探索。"
-            }
-
-        memory_entry = {
+        new_turn = {
             "turn_id": turn_id,
-            "user_input_signal": "USER_ACTION",  # 标记这是用户行动触发的记忆点
-            "user_free_text": user_action,  # 保存用户的原始输入
-            "generated_narrative_segment": generated_narrative if generated_narrative else "",  # 保存AI生成的叙事
-            **llm_metadata  # 合并LLM提供的（或我们生成的默认）元数据
+            "user_input_signal": "USER_ACTION",
+            "user_free_text": user_action,
+            "protagonist_action_summary": metadata.get("protagonist_action_summary",
+                                                       f"主角执行: {user_action[:30]}..."),
+            "event_time_readable_context": event_time,
+            "generated_narrative_segment": narrative_text,
+            "immediate_consequences_and_observations": metadata.get("immediate_consequences_and_observations", []),
+            "character_state_changes": metadata.get("character_state_changes", {}),
+            "item_changes": metadata.get("item_changes", {}),
+            "world_state_changes": metadata.get("world_state_changes", []),
+            "divergence_from_original_plot": metadata.get("divergence_from_original_plot", default_divergence),
+            "planned_reconvergence_point_id_if_any": metadata.get("planned_reconvergence_point_id_if_any"),
+            "current_chapter_progression_hint": metadata.get("current_chapter_progression_hint")
         }
-        self.session_memory.append(memory_entry)
+        self.session_memory.append(new_turn)
+        utils.write_json_file(self.session_memory, self.session_memory_path)
 
-        # 会话记忆通常在游戏存档时一起保存，而不是每一步都写盘，以提高性能
-        # if not utils.write_json_file(self.session_memory, self.session_memory_path):
-        #     print(f"警告: 更新并保存会话记忆到 {self.session_memory_path} 失败。")
-        print(f"会话记忆已更新，当前共 {len(self.session_memory)} 条记忆点。")
+    def _update_current_narrative_chapter_index(self, chapter_prog_hint: Optional[str]):
+        """
+        根据LLM元数据中的章节进展提示，更新当前叙事章节索引。
+        """
+        if not chapter_prog_hint or not self.chapters_data: return
 
-    def _check_and_advance_chapter(self, llm_metadata: Optional[Dict[str, Any]]):
-        """根据LLM元数据中的章节进展提示来尝试推进章节索引。"""
-        if not llm_metadata or not isinstance(llm_metadata, dict): return  # 没有元数据无法判断
-
-        progression_hint = llm_metadata.get("current_chapter_progression_hint", "").lower()
-        advance_chapter_flag = False  # 是否应该尝试推进章节的标志
-        target_chapter_num_from_hint = -1  # 从提示中解析出的目标章节号
-
-        # 检查是否明确提及“下一章”或类似词语
-        if "下一章" in progression_hint or "next chapter" in progression_hint or "进入新章节" in progression_hint:
-            advance_chapter_flag = True
-
-        # 尝试从提示中解析具体的章节号，例如 "已进入第 5 章"
-        num_match = re.search(r'(?:进入|到达|完成|开始).*(?:第|chapter)\s*(\d+)\s*(?:章|节)', progression_hint,
-                              re.IGNORECASE)
-        if num_match:
+        # 优先匹配 "进入第 X 章" 或 "已到第 X 章"
+        next_chapter_match = re.search(r"(?:进入|已到|已是|开始)\s*第\s*(\d+|[一二三四五六七八九十百千万零]+)\s*章",
+                                       chapter_prog_hint, re.IGNORECASE) or \
+                             re.search(r"Chapter\s*(\d+)\s*(?:start|begin|entered)", chapter_prog_hint, re.IGNORECASE)
+        if next_chapter_match:
             try:
-                hinted_chapter_num = int(num_match.group(1))
-                current_actual_chapter_num = self._get_current_chapter_number()  # 获取当前章节的“真实”编号
-                if hinted_chapter_num > current_actual_chapter_num:  # 只有当提示的章节号大于当前才认为是推进
-                    advance_chapter_flag = True
-                    target_chapter_num_from_hint = hinted_chapter_num
-                elif hinted_chapter_num == current_actual_chapter_num and "完成" in progression_hint:  # 如果是说“完成当前章”
-                    advance_chapter_flag = True  # 也尝试推进
-                elif hinted_chapter_num < current_actual_chapter_num:
-                    print(
-                        f"LLM提示章节 {hinted_chapter_num}, 但小于当前章节 {current_actual_chapter_num}。不执行章节回退。")
-            except ValueError:
-                print(f"无法从章节进展提示中解析数字: '{progression_hint}'")
+                target_chapter_num_str = next_chapter_match.group(1)
+                target_chapter_num = utils.chinese_to_arabic_number(target_chapter_num_str)
+                if target_chapter_num is None and target_chapter_num_str.isdigit():
+                    target_chapter_num = int(target_chapter_num_str)
 
-        if advance_chapter_flag:
-            if self.current_narrative_chapter_index < len(self.chapters_data) - 1:
-                # 如果有具体的目标章节号，并且能找到它
-                if target_chapter_num_from_hint > 0:
-                    found_target_index = -1
-                    for idx, chap_data in enumerate(self.chapters_data):
-                        if chap_data.get("chapter_number") == target_chapter_num_from_hint:
-                            found_target_index = idx
+                if target_chapter_num is not None and target_chapter_num > 0:
+                    # 找到该章节号在 chapters_data 中的索引
+                    new_target_idx = -1
+                    for idx, ch_data in enumerate(self.chapters_data):
+                        if ch_data.get("chapter_number") == target_chapter_num:
+                            new_target_idx = idx
                             break
-                    if found_target_index != -1 and found_target_index > self.current_narrative_chapter_index:
-                        self.current_narrative_chapter_index = found_target_index
-                        new_actual_chap_num = self._get_current_chapter_number()
+
+                    if new_target_idx != -1 and new_target_idx > self.current_narrative_chapter_index:
+                        self.current_narrative_chapter_index = new_target_idx
                         print(
-                            f"根据LLM元数据，章节已精确推进到第 {new_actual_chap_num} 章 (索引 {self.current_narrative_chapter_index})。")
-                    elif found_target_index != -1 and found_target_index <= self.current_narrative_chapter_index:
-                        print(
-                            f"LLM提示章节 {target_chapter_num_from_hint} (索引 {found_target_index}), 不大于当前索引 {self.current_narrative_chapter_index}。仅推进一章。")
-                        self.current_narrative_chapter_index += 1  # 默认推进一章
-                        new_actual_chap_num = self._get_current_chapter_number()
-                        print(
-                            f"章节已推进。当前叙事焦点章节索引: {self.current_narrative_chapter_index} (实际章节号: {new_actual_chap_num})")
-                    else:  # 没找到目标章节，默认推进一章
-                        print(f"LLM提示目标章节 {target_chapter_num_from_hint} 但未在数据中找到。默认推进一章。")
-                        self.current_narrative_chapter_index += 1
-                        new_actual_chap_num = self._get_current_chapter_number()
-                        print(
-                            f"章节已推进。当前叙事焦点章节索引: {self.current_narrative_chapter_index} (实际章节号: {new_actual_chap_num})")
-                else:  # 没有具体目标章节号，但有推进信号，则默认推进一章
-                    self.current_narrative_chapter_index += 1
-                    new_actual_chap_num = self._get_current_chapter_number()
-                    print(
-                        f"章节已推进。当前叙事焦点章节索引: {self.current_narrative_chapter_index} (实际章节号: {new_actual_chap_num})")
-            else:
-                print("已是最后一章，无法再根据提示推进章节。")
+                            f"叙事章节索引更新为: {self.current_narrative_chapter_index} (对应第 {target_chapter_num} 章)")
+                        return
+            except ValueError:
+                pass
 
-    def save_state_to_file(self) -> Optional[str]:
-        """将引擎状态保存到文件。"""
-        try:
-            save_dir = os.path.join(self.novel_data_dir, 'saves')
-            os.makedirs(save_dir, exist_ok=True)
+        # 其次匹配事件ID提示，如果事件ID对应的章节大于当前章节
+        event_match = re.search(r"事件\s*([Ee][\w\d-]+)", chapter_prog_hint)  # 允许ID包含字母数字和短横线
+        if event_match and self.novel_analysis and self.novel_analysis.get("detailed_timeline_and_key_events"):
+            event_id_hint = event_match.group(1).upper()
+            for event_details in self.novel_analysis["detailed_timeline_and_key_events"]:
+                if isinstance(event_details, dict) and event_details.get("event_id", "").upper() == event_id_hint:
+                    event_chapter_approx = event_details.get("chapter_approx")
+                    if event_chapter_approx is not None and event_chapter_approx > 0:
+                        event_target_idx = -1
+                        for idx, ch_data in enumerate(self.chapters_data):
+                            if ch_data.get("chapter_number") == event_chapter_approx:
+                                event_target_idx = idx
+                                break
+                        if event_target_idx != -1 and event_target_idx > self.current_narrative_chapter_index:
+                            self.current_narrative_chapter_index = event_target_idx
+                            print(
+                                f"叙事章节索引据事件 {event_id_hint} 更新为: {self.current_narrative_chapter_index} (原著约第 {event_chapter_approx} 章)")
+                            return
+                    break
 
-            timestamp_str = time.strftime('%Y%m%d_%H%M%S')
-            novel_title_part = "untitled"
-            if self.analysis and self.analysis.get("title"):  # 从已加载的分析数据中获取标题
-                novel_title_part = utils.sanitize_filename(self.analysis.get("title")[:20])
-            elif self.analysis and self.analysis.get("novel_title"):  # 兼容旧的分析结构
-                novel_title_part = utils.sanitize_filename(self.analysis.get("novel_title")[:20])
+        # 如果没有明确的章节跳转，但提示“接近本章末尾”或“本章已结束”，并且后面还有章节，则可以尝试推进一章
+        # 这个逻辑比较tricky，需要小心处理，暂时不加，避免意外跳章。
+        # current_actual_chapter_num = self._get_current_chapter_number()
+        # if ("末尾" in chapter_prog_hint or "结束" in chapter_prog_hint or "结尾" in chapter_prog_hint) and \
+        #    self.current_narrative_chapter_index < len(self.chapters_data) - 1:
+        #    # 检查是否真的在当前章节的末尾（比如通过与原文比较，但这很难）
+        #    # 简单处理：如果LLM说末尾，就尝试进一章，但这可能不准
+        #    pass
 
-            save_filename = f'storysave_{novel_title_part}_{timestamp_str}.json'
-            save_path = os.path.join(save_dir, save_filename)
+        print(
+            f"未能从提示 '{chapter_prog_hint}' 中明确更新章节索引。保持当前索引 {self.current_narrative_chapter_index} (第 {self._get_current_chapter_number()} 章)。")
 
-            current_state_data = self.get_state_for_saving()  # 获取包含 session_memory 和 conversation_history 的完整状态
-
-            if utils.write_json_file(current_state_data, save_path):
-                print(f"叙事引擎状态已保存到: {save_path}")
-                # 同时更新会话记忆的持久化存储（如果之前不是每步都存盘）
-                if not utils.write_json_file(self.session_memory, self.session_memory_path):
-                    print(
-                        f"警告: 保存 session_memory 到 {self.session_memory_path} 失败。存档文件仍包含最新 session_memory。")
-                return save_path
-            else:
-                self.last_error = f"写入存档文件 {save_path} 失败。"
-                print(self.last_error)
-                return None
-        except Exception as e:
-            self.last_error = f"保存引擎状态时发生严重错误: {str(e)}"
-            print(self.last_error)
-            traceback.print_exc()
+    def _determine_reconvergence_plan(self) -> Optional[str]:
+        """
+        判断当前剧情是否需要向原著主线重聚，并确定下一个重聚点。
+        只考虑非常临近的未来锚点。
+        """
+        if not self.session_memory or not self.novel_analysis or not self.novel_analysis.get(
+                "detailed_timeline_and_key_events"):
             return None
+
+        last_turn = self.session_memory[-1]
+        divergence_level = last_turn.get("divergence_from_original_plot", {}).get("level", "无")
+        trigger_levels = [config.DIVERGENCE_THRESHOLD_FOR_RECONVERGENCE.lower()]
+        if config.DIVERGENCE_THRESHOLD_FOR_RECONVERGENCE.lower() == "中度":
+            trigger_levels.append("显著")
+
+        if divergence_level.lower() in trigger_levels:
+            timeline = self.novel_analysis.get("detailed_timeline_and_key_events", [])
+            processed_refs = {t.get("divergence_from_original_plot", {}).get("original_timeline_event_ref")
+                              for t in self.session_memory
+                              if t.get("divergence_from_original_plot", {}).get("original_timeline_event_ref")}
+
+            current_actual_chapter_num = self._get_current_chapter_number()
+
+            # 寻找最近的、未发生的、且在合理范围内的锚点事件
+            potential_targets = []
+            for event in timeline:
+                if not isinstance(event, dict): continue
+                event_id, event_chapter = event.get("event_id"), event.get("chapter_approx")
+                if event.get("is_anchor_event") and event_id and event_id not in processed_refs and \
+                        event_chapter is not None and event_chapter > current_actual_chapter_num:
+                    potential_targets.append(event)
+
+            if not potential_targets:
+                return None
+
+            # 对潜在目标按章节号排序，选择最近的
+            potential_targets.sort(key=lambda e: e.get("chapter_approx", float('inf')))
+
+            next_anchor_event = potential_targets[0]
+            target_event_chapter = next_anchor_event.get("chapter_approx")
+
+            # 确保这个锚点事件不是太遥远 (例如，不超过接下来2-3章)
+            if target_event_chapter <= current_actual_chapter_num + 3:  # 可配置的范围
+                target_info = f"{next_anchor_event.get('event_id')}: {next_anchor_event.get('description', '未知锚点事件')[:50]}... (原著第 {target_event_chapter} 章)"
+                self.session_memory[-1]["planned_reconvergence_point_id_if_any"] = next_anchor_event.get('event_id')
+                utils.write_json_file(self.session_memory, self.session_memory_path)
+                print(
+                    f"检测到偏离，计划向锚点事件 {next_anchor_event.get('event_id')} (第 {target_event_chapter} 章) 重聚。")
+                return target_info
+            else:
+                print(
+                    f"检测到偏离，但最近的锚点事件 {next_anchor_event.get('event_id')} (第 {target_event_chapter} 章) 距离较远，暂不强制重聚。")
+
+        return None
+
+    def process_user_action(self, user_action: str) -> Optional[str]:
+        """
+        处理用户的行动输入，生成后续叙事。
+        """
+        if not self.novel_analysis or not self.chapters_data or not self.session_memory:
+            return "系统错误：数据未初始化。"
+
+        current_chapter_text_segment = self._get_current_chapter_segment_text()
+        plot_memory_summary = json.dumps(self.session_memory[-3:], ensure_ascii=False, indent=2)
+
+        last_event_time = self.session_memory[-1].get("event_time_readable_context",
+                                                      f"第 {self._get_current_chapter_number()} 章")
+        last_event_desc = self.session_memory[-1].get("protagonist_action_summary", "先前行动")
+
+        current_actual_chapter_num_for_context = self._get_current_chapter_number()
+
+        core_settings_context = self._get_relevant_core_settings_summary(
+            current_event_context=f"当前时间点约在 {last_event_time} (第 {current_actual_chapter_num_for_context} 章内)，主角刚完成：{last_event_desc}"
+        )
+        reconvergence_plan_info = self._determine_reconvergence_plan()
+
+        user_prompt_content = prompts.get_narrative_continuation_user_prompt_content(
+            current_chapter_segment_text=current_chapter_text_segment,
+            plot_memory_archive_summary=plot_memory_summary,
+            core_settings_summary_for_current_context=core_settings_context,
+            user_action=user_action,
+            current_chapter_number_for_context=current_actual_chapter_num_for_context,
+            planned_reconvergence_info=reconvergence_plan_info
+        )
+
+        self.conversation_history.append({"role": "user", "content": user_prompt_content})
+        if len(self.conversation_history) > (1 + 5 * 2):
+            self.conversation_history = [self.conversation_history[0]] + self.conversation_history[-(5 * 2):]
+
+        print(
+            f"请求LLM ({self.llm_writer_client.client_type} - {self.writing_model_name}) 生成叙事后续 (基于第 {current_actual_chapter_num_for_context} 章上下文)...")
+        llm_response = self.llm_writer_client.generate_chat_completion(
+            self.writing_model_name, self.conversation_history, stream=False, expect_json_in_content=True
+        )
+
+        if llm_response and llm_response.get("message") and isinstance(llm_response["message"].get("content"), str):
+            full_output = llm_response["message"]["content"]
+            narrative_text, metadata = utils.extract_narrative_and_metadata(full_output)
+
+            if metadata is None:
+                print(f"警告：未能从LLM输出中解析元数据。LLM原始输出: {full_output[:300]}...")
+                metadata = {
+                    "protagonist_action_summary": f"主角执行了: {user_action[:50]}...",
+                    "event_time_readable_context": f"第 {self._get_current_chapter_number()} 章附近 (AI未提供时间)",
+                    "immediate_consequences_and_observations": ["剧情继续发展。"],
+                    "character_state_changes": {}, "item_changes": {}, "world_state_changes": [],
+                    "divergence_from_original_plot": {"level": "未知", "original_timeline_event_ref": None,
+                                                      "description_of_divergence": "AI未提供分析"},
+                    "current_chapter_progression_hint": None
+                }
+                if not narrative_text.strip(): narrative_text = "（AI未能生成有效的后续剧情和元数据。）"
+
+            turn_id = self.session_memory[-1]["turn_id"] + 1
+            self._update_session_memory_entry(turn_id=turn_id, user_action=user_action, narrative_text=narrative_text,
+                                              metadata=metadata)
+            self._update_current_narrative_chapter_index(metadata.get("current_chapter_progression_hint"))
+            self.conversation_history.append({"role": "assistant", "content": full_output})  # 存储包含元数据标记的完整回复
+            return narrative_text
+        else:
+            error_msg = f"错误：未能从LLM ({self.writing_model_name}) 获取叙事后续。响应: {llm_response}"
+            print(error_msg)
+            return error_msg
+
+    def end_session(self) -> str:
+        """结束当前的叙事会话。"""
+        print("--- 阶段 4：结束叙事会话 ---")
+        if utils.write_json_file(self.session_memory, self.session_memory_path):
+            message = f"互动会话结束。会话记忆已保存到: {self.session_memory_path}"
+        else:
+            message = f"互动会话结束。保存会话记忆到 {self.session_memory_path} 时出错。"
+        self.conversation_history = []
+        return message
+
+    def get_state_for_saving(self) -> Dict[str, Any]:
+        """返回叙事引擎的当前状态，用于保存游戏。"""
+        if self.session_memory:
+            utils.write_json_file(self.session_memory, self.session_memory_path)
+        return {
+            "current_narrative_chapter_index": self.current_narrative_chapter_index,
+            "conversation_history": self.conversation_history,
+            "session_memory_path": self.session_memory_path,
+        }
+
+    def _load_state(self, saved_state: Dict[str, Any]):
+        """从字典加载叙事引擎的状态。"""
+        if not self._load_core_data():
+            raise ValueError("恢复叙事引擎状态时加载核心数据 (章节/分析) 失败。")
+
+        self.current_narrative_chapter_index = saved_state.get("current_narrative_chapter_index", 0)
+        # 确保加载的 chapter_index 在 chapters_data 的有效范围内
+        if not (self.chapters_data and 0 <= self.current_narrative_chapter_index < len(self.chapters_data)):
+            print(f"警告：加载的 current_narrative_chapter_index ({self.current_narrative_chapter_index}) "
+                  f"超出了章节数据范围 (0-{len(self.chapters_data) - 1 if self.chapters_data else -1})。将重置为0。")
+            self.current_narrative_chapter_index = 0
+
+        self.conversation_history = saved_state.get("conversation_history", [])
+
+        session_memory_file_path = saved_state.get("session_memory_path", self.session_memory_path)
+        if os.path.exists(session_memory_file_path):
+            self.session_memory = utils.read_json_file(session_memory_file_path) or []
+            print(f"会话记忆已从 {session_memory_file_path} 加载")
+        else:
+            print(f"警告: 会话记忆文件 {session_memory_file_path} 在状态加载期间未找到。将以空会话记忆开始。")
+            self.session_memory = []
+
+        # 如果对话历史为空但会话记忆有内容，尝试从 session_memory 重建最后一次AI的完整回复
+        if not self.conversation_history and self.session_memory:
+            print("尝试从最后一个会话记忆回合重建部分对话历史。")
+            self.conversation_history = [{"role": "system", "content": prompts.NARRATIVE_ENGINE_SYSTEM_PROMPT}]
+            last_turn = self.session_memory[-1]
+
+            # 尝试重建包含元数据标记的 assistant 消息
+            reconstructed_assistant_message = last_turn.get("generated_narrative_segment", "")
+            # 从 session_memory 的 last_turn 中提取元数据字段来重建元数据JSON块
+            # 这需要确保 session_memory 中存储了所有必要的元数据字段
+            # (我们已经在 _update_session_memory_entry 中这样做了)
+            metadata_for_reconstruction = {
+                "protagonist_action_summary": last_turn.get("protagonist_action_summary"),
+                "event_time_readable_context": last_turn.get("event_time_readable_context"),
+                "immediate_consequences_and_observations": last_turn.get("immediate_consequences_and_observations", []),
+                "character_state_changes": last_turn.get("character_state_changes", {}),
+                "item_changes": last_turn.get("item_changes", {}),
+                "world_state_changes": last_turn.get("world_state_changes", []),
+                "divergence_from_original_plot": last_turn.get("divergence_from_original_plot", {}),
+                "current_chapter_progression_hint": last_turn.get("current_chapter_progression_hint")
+            }
+            # 移除值为None的键，以匹配LLM通常不输出空键的行为
+            metadata_for_reconstruction = {k: v for k, v in metadata_for_reconstruction.items() if v is not None}
+
+            if metadata_for_reconstruction:  # 仅当有实际元数据时才添加块
+                metadata_json_str = json.dumps(metadata_for_reconstruction, ensure_ascii=False, indent=2)
+                reconstructed_assistant_message += f"\n[NARRATIVE_METADATA_JSON_START]\n{metadata_json_str}\n[NARRATIVE_METADATA_JSON_END]"
+
+            if reconstructed_assistant_message.strip():
+                self.conversation_history.append({"role": "assistant", "content": reconstructed_assistant_message})
+
+        print(
+            f"叙事引擎状态已加载: 章节索引 {self.current_narrative_chapter_index} (第 {self._get_current_chapter_number()} 章), "
+            f"对话历史长度 {len(self.conversation_history)}, 会话记忆长度 {len(self.session_memory)}")
+
+
+if __name__ == "__main__":
+    print("叙事引擎请通过主应用运行测试。")
