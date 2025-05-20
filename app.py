@@ -158,11 +158,12 @@ def get_effective_model_name(model_choice_key: str, custom_type_key: str, custom
 
     if model_choice == "custom":
         custom_type = app_state.get(custom_type_key)  # "ollama" or "online"
-        if custom_type == "ollama" and not use_online_api:
+        # 修改：优先尊重custom_type，而非依赖use_online_api
+        if custom_type == "ollama":
             return app_state.get(custom_ollama_key) or app_state.get(general_ollama_key, "未指定Ollama模型")
-        elif custom_type == "online" and use_online_api:
+        elif custom_type == "online":
             return app_state.get(custom_online_key) or app_state.get(general_online_key, "未指定在线模型")
-        else:  # 类型不匹配，回退
+        else:  # 未知类型，回退
             return app_state.get(general_ollama_key) if not use_online_api else app_state.get(general_online_key,
                                                                                               "模型不适用")
     else:  # 预设模型 (e.g., "llama3", "mistral", "qwen")
@@ -178,7 +179,16 @@ def init_llm_client():
     app_state["llm_client"] = None
     current_config = config_manager.load_api_configs(DATA_DIR)  # 从持久化配置加载
 
+    # 修改：优先根据writing_custom_type决定使用哪种客户端
+    writing_custom_type = app_state.get("writing_custom_type", "ollama")
     use_online = current_config.get("use_online_api", False)
+    
+    # 如果写作模型类型是online，则强制使用在线API
+    if writing_custom_type == "online":
+        use_online = True
+        # 同步更新app_state和配置
+        app_state["use_online_api"] = True
+        config_manager.update_api_config(DATA_DIR, {"use_online_api": True})
 
     # 以 "writing_model" (叙事模型) 的配置为准来初始化主 llm_client
     # 因为分析阶段的 NovelProcessor 也会接收这个 llm_client 实例，并可指定不同模型名
@@ -283,6 +293,18 @@ def update_api_config_route():
     data = request.json
     updates_to_save = {}  # 存储需要保存到 config_manager 的更新
 
+    # 写作模型选择 - 需要先处理这部分，因为它可能影响use_online_api
+    for key in ["writing_model_name", "writing_custom_type", "writing_custom_ollama_model",
+                "writing_custom_online_model"]:
+        if key in data:
+            updates_to_save[key] = data[key]
+            app_state[key] = data[key]
+            
+    # 修改：当writing_custom_type为"online"时，自动设置use_online_api为True
+    if data.get("writing_custom_type") == "online":
+        updates_to_save["use_online_api"] = True
+        app_state["use_online_api"] = True
+    
     # 基本API类型选择
     if "use_online_api" in data:
         updates_to_save["use_online_api"] = data["use_online_api"]
@@ -313,13 +335,6 @@ def update_api_config_route():
     # 分析模型选择
     for key in ["analysis_model_name", "analysis_custom_type", "analysis_custom_ollama_model",
                 "analysis_custom_online_model"]:
-        if key in data:
-            updates_to_save[key] = data[key]
-            app_state[key] = data[key]
-
-    # 写作模型选择
-    for key in ["writing_model_name", "writing_custom_type", "writing_custom_ollama_model",
-                "writing_custom_online_model"]:
         if key in data:
             updates_to_save[key] = data[key]
             app_state[key] = data[key]
@@ -474,22 +489,72 @@ def upload_novel():
             app_state["app_stage"] = "config_novel"  # 回到配置阶段
             return jsonify({'success': False, 'error': 'LLM客户端初始化失败，请检查API配置后再上传。'})
 
-    # 为 NovelProcessor 确定分析模型
-    # NovelProcessor 将使用 app_state["llm_client"]，但其内部调用 generate_chat_completion 时需要指定正确的分析模型名
-    # 我们需要根据分析模型的配置来决定传递给 NovelProcessor 的 llm_client 的 default_model 或让它能用特定模型名
-
-    # 方案：NovelProcessor的_call_llm_for_analysis_raw_json方法应能接受一个model_name参数
-    # 这里先获取分析模型名，然后传递给 NovelProcessor 的构造函数或 process_novel 方法
-
+    # 为 NovelProcessor 确定分析模型和客户端
+    # 修改：根据analysis_custom_type动态选择客户端类型，确保与API类型匹配
     current_api_config_for_analysis = config_manager.load_api_configs(DATA_DIR)
-    effective_analysis_model = get_effective_model_name(
-        "analysis_model_name",
-        "analysis_custom_type",
-        "analysis_custom_ollama_model",
-        "analysis_custom_online_model",
-        "selected_ollama_model", "online_api_model",
-        current_api_config_for_analysis.get("use_online_api", False)
-    )
+    
+    # 获取分析模型的类型和名称
+    analysis_custom_type = app_state.get("analysis_custom_type", "ollama")
+    analysis_model_name = app_state.get("analysis_model_name", "")
+    
+    # 根据分析模型类型决定使用哪种客户端
+    analysis_client = None
+    effective_analysis_model = ""
+    
+    if analysis_custom_type == "online":
+        # 使用在线API客户端
+        api_url = current_api_config_for_analysis.get("online_api_url", "")
+        api_key = current_api_config_for_analysis.get("online_api_key", "")
+        
+        if analysis_model_name == "custom":
+            effective_analysis_model = app_state.get("analysis_custom_online_model", "")
+        else:
+            effective_analysis_model = analysis_model_name
+            
+        if api_url and api_key and effective_analysis_model:
+            try:
+                analysis_client = GenericOnlineAPIClient(
+                    api_url=api_url, 
+                    api_key=api_key,
+                    default_model=effective_analysis_model
+                )
+                print(f"已为分析阶段初始化 GenericOnlineAPIClient, 模型: {effective_analysis_model}")
+            except Exception as e:
+                print(f"初始化分析阶段 GenericOnlineAPIClient 错误: {e}")
+        else:
+            print("在线API凭据或分析模型未完全配置。")
+    else:  # 默认使用Ollama
+        api_url = current_api_config_for_analysis.get("ollama_api_url", "")
+        
+        if analysis_model_name == "custom":
+            effective_analysis_model = app_state.get("analysis_custom_ollama_model", "")
+        else:
+            effective_analysis_model = analysis_model_name
+            
+        if api_url and effective_analysis_model:
+            try:
+                analysis_client = OllamaClient(
+                    api_url=api_url, 
+                    default_model=effective_analysis_model
+                )
+                print(f"已为分析阶段初始化 OllamaClient, 模型: {effective_analysis_model}")
+            except Exception as e:
+                print(f"初始化分析阶段 OllamaClient 错误: {e}")
+        else:
+            print("Ollama API URL 或分析模型未配置。")
+    
+    # 如果无法创建分析客户端，则使用主客户端（写作模型客户端）
+    if not analysis_client:
+        analysis_client = app_state["llm_client"]
+        effective_analysis_model = get_effective_model_name(
+            "analysis_model_name",
+            "analysis_custom_type",
+            "analysis_custom_ollama_model",
+            "analysis_custom_online_model",
+            "selected_ollama_model", "online_api_model",
+            current_api_config_for_analysis.get("use_online_api", False)
+        )
+        print(f"警告：无法创建专用分析客户端，将使用主客户端。分析模型: {effective_analysis_model}")
 
     print(f"小说分析将使用模型: {effective_analysis_model}")
     if not effective_analysis_model or "未指定" in effective_analysis_model or "不适用" in effective_analysis_model:
@@ -497,34 +562,13 @@ def upload_novel():
         return jsonify(
             {'success': False, 'error': f'未能确定有效的分析模型: {effective_analysis_model}。请检查API和模型配置。'})
 
-    # NovelProcessor现在直接使用传入的llm_client。
-    # 如果分析模型和写作模型不同，理想情况下，llm_client.generate_chat_completion应接受model参数。
-    # OllamaClient 和 GenericOnlineAPIClient 的 generate_chat_completion 都接受 model 参数。
-    # NovelProcessor._call_llm_for_analysis_raw_json 已修改为使用self.llm_client.default_model，但它可以被修改为接受一个 model_name。
-    # 为了代码的清晰，我们假设NovelProcessor的构造函数或者process_novel方法可以接受一个 specific_model_for_analysis 参数。
-    # 如果NovelProcessor内部没有这种机制，那么就需要一个专用的分析LLM客户端，或者在调用前临时修改主客户端的default_model（不推荐）。
-
-    # 假设 NovelProcessor 可以被告知使用哪个模型 (通过修改其内部调用)
-    # 或者，更简单的方法是，如果分析模型和写作模型使用的API类型不同，则需要不同的客户端实例。
-    # 目前，我们只有一个主 app_state["llm_client"]。
-    # 我们需要确保 NovelProcessor 在调用 LLM 时使用的是 `effective_analysis_model`。
-    # 解决方案: 修改 NovelProcessor，使其能够接收并使用特定的分析模型名。
-    # 暂时，我们依赖于 `NovelProcessor` 的 `_call_llm_for_analysis_raw_json` 方法能够被修改或已支持模型参数。
-    # 在 `novel_processor.py` 的 `_call_llm_for_analysis_raw_json` 中，`model=model_to_use`，这个 `model_to_use` 应该被设置为 `effective_analysis_model`。
-    # 这意味着 `NovelProcessor` 初始化或 `_analyze_novel` 方法需要知道这个 `effective_analysis_model`。
-
-    # 传递分析模型名给 NovelProcessor
+    # 传递分析客户端和模型名给 NovelProcessor
     novel_processor = NovelProcessor(
-        llm_client=app_state["llm_client"],  # 主客户端实例
+        llm_client=analysis_client,  # 使用专用的分析客户端
         novel_file_path=file_path_in_data_dir,
         output_dir=novel_data_dir,
-        # 可以添加一个参数指定分析模型，例如:
         analysis_model_override=effective_analysis_model
     )
-    # 注意: 上述 `analysis_model_override` 需要在 NovelProcessor 的 `__init__` 和 `_call_llm_for_analysis_raw_json` 中实现。
-    # 如果不修改 NovelProcessor，它将使用 `app_state["llm_client"].default_model` (当前是写作模型)。
-    # 为此演示，假设 `NovelProcessor` 会智能地使用正确的模型，或我们已修改它。
-    # 实际更稳妥的是在 NovelProcessor 的 `__init__` 中接收 `analysis_model_override`，并在 `_call_llm_for_analysis_raw_json` 中使用它。
 
     success = novel_processor.process_novel()  # process_novel 内部应使用 effective_analysis_model
 
