@@ -43,7 +43,7 @@ def load_history_conversations(data_dir: str) -> List[Dict[str, Any]]:
     history_list.sort(key=lambda x: x["metadata"].get("timestamp", 0), reverse=True)
     return history_list
 
-def save_current_conversation(data_dir: str, narrative_engine, novel_name: str, app_config: Dict[str, Any]) -> Optional[str]:
+def save_current_conversation(data_dir: str, narrative_engine, novel_name: str, app_config: Dict[str, Any], original_filename: str = None) -> Optional[str]:
     """
     保存当前对话到历史记录
     
@@ -52,6 +52,7 @@ def save_current_conversation(data_dir: str, narrative_engine, novel_name: str, 
         narrative_engine: 叙事引擎实例
         novel_name: 小说名称
         app_config: 应用配置
+        original_filename: 原始上传文件名，用作历史对话标题
         
     Returns:
         保存的文件路径，如果保存失败则返回None
@@ -67,7 +68,7 @@ def save_current_conversation(data_dir: str, narrative_engine, novel_name: str, 
         # 获取叙事引擎的当前状态
         engine_state = narrative_engine.get_state_for_saving()
 
-        # 提取对话内容的摘要作为标题
+        # 提取对话内容的摘要作为备用标题
         conversation_summary = "无对话内容"
         if narrative_engine.conversation_history:
             # 使用最后一条AI消息作为摘要
@@ -81,9 +82,12 @@ def save_current_conversation(data_dir: str, narrative_engine, novel_name: str, 
         timestamp = int(time.time())
         formatted_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
+        # 如果提供了原始文件名，则使用它作为标题
+        title = original_filename if original_filename else conversation_summary
+
         metadata = {
             "novel_name": novel_name,
-            "title": conversation_summary,
+            "title": title,
             "timestamp": timestamp,
             "formatted_time": formatted_time,
             "message_count": len(narrative_engine.conversation_history)

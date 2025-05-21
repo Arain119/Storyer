@@ -457,6 +457,10 @@ def upload_novel():
     novel_title_from_form = request.form.get('novel_title', '')
     # 如果表单提供了标题则用表单的，否则用文件名（不含扩展名）
     novel_title = novel_title_from_form if novel_title_from_form.strip() else os.path.splitext(file.filename)[0]
+    
+    # 保存原始文件名，用于历史对话标题
+    original_filename = file.filename
+    app_state["original_filename"] = original_filename
 
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     unique_id = str(uuid.uuid4())[:8]
@@ -700,6 +704,38 @@ def process_action():
             for entry in app_state["narrative_engine"].conversation_history:
                 speaker = "用户" if entry.get("role") == "user" else ("系统" if entry.get("role") == "system" else "AI")
                 app_state["narrative_history_display"].append((speaker, entry.get("content", "")))
+        
+        # 自动保存对话到历史记录
+        # 准备用于历史记录的配置快照
+        app_config_for_history = {key: current_api_config.get(key) for key in [
+            "temperature", "top_p", "max_tokens", "frequency_penalty", "presence_penalty",
+            "initial_context_chapters", "window_before", "window_after", "divergence_threshold",
+            "use_online_api",
+            "analysis_model_name", "analysis_custom_type", "analysis_custom_ollama_model",
+            "analysis_custom_online_model",
+            "writing_model_name", "writing_custom_type", "writing_custom_ollama_model", "writing_custom_online_model",
+            "selected_ollama_model", "online_api_model"
+        ]}
+        # 补全 ollama_api_url 和 online_api_url (但不包括 key)
+        app_config_for_history["ollama_api_url"] = current_api_config.get("ollama_api_url")
+        app_config_for_history["online_api_url"] = current_api_config.get("online_api_url")
+
+        # 获取原始文件名作为历史对话标题
+        original_filename = app_state.get("original_filename", None)
+        
+        # 自动保存到历史记录
+        history_path = history_manager.save_current_conversation(
+            data_dir=DATA_DIR,
+            narrative_engine=app_state["narrative_engine"],
+            novel_name=app_state.get("novel_title", "未知小说"),
+            app_config=app_config_for_history,
+            original_filename=original_filename
+        )
+        
+        # 刷新历史对话列表
+        if history_path:
+            app_state["history_conversations"] = history_manager.load_history_conversations(DATA_DIR)
+            
         return jsonify({'success': True, 'response': response})
     else:
         error_msg = "处理用户行动失败。"
