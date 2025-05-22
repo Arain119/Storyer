@@ -528,10 +528,22 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     // 添加初始叙事到历史
                     const narrativeHistory = document.getElementById('narrative-history');
-                    const messageContainer = document.createElement('div');
-                    messageContainer.className = 'message-container ai-message';
-                    messageContainer.innerHTML = `<strong>系统:</strong><p>${data.initial_narrative}</p>`;
-                    narrativeHistory.appendChild(messageContainer);
+                    narrativeHistory.innerHTML = ''; // Clear existing messages
+
+                    data.narrative_messages.forEach(item => { // data.narrative_messages is the new key
+                        const speaker = item[0];
+                        const messageContent = item[1];
+                        
+                        const messageContainer = document.createElement('div');
+                        messageContainer.classList.add('message-container');
+                        if (speaker === '用户') {
+                            messageContainer.classList.add('user-message');
+                        } else {
+                            messageContainer.classList.add('ai-message');
+                        }
+                        messageContainer.innerHTML = `<strong>${speaker}:</strong><p>${messageContent}</p>`;
+                        narrativeHistory.appendChild(messageContainer);
+                    });
                     
                     // 滚动到底部
                     narrativeHistory.scrollTop = narrativeHistory.scrollHeight;
@@ -596,7 +608,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     // 添加系统响应到历史
                     const aiMessageContainer = document.createElement('div');
                     aiMessageContainer.className = 'message-container ai-message';
-                    aiMessageContainer.innerHTML = `<strong>系统:</strong><p>${data.response}</p>`;
+                    aiMessageContainer.innerHTML = `<strong>AI:</strong><p>${data.response}</p>`;
                     narrativeHistory.appendChild(aiMessageContainer);
                     
                     // 滚动到底部
