@@ -219,96 +219,14 @@ document.addEventListener('DOMContentLoaded', function() {
     // 页面加载时自动刷新一次模型列表
     setTimeout(refreshOllamaModels, 500);
 
-    // API配置表单提交
+    // API配置表单提交 - 移除提交处理，由悬浮保存按钮负责
     const apiConfigForm = document.getElementById('api-config-form');
 
     if (apiConfigForm) {
         apiConfigForm.addEventListener('submit', function(e) {
+            // 阻止表单默认提交行为
             e.preventDefault();
-
-            // 获取API类型
-            const useOnlineApi = document.getElementById('use-online-api').checked;
-
-            // 基本配置
-            const config = {
-                use_online_api: useOnlineApi
-            };
-
-            // Ollama API配置
-            if (!useOnlineApi) {
-                config.ollama_api_url = document.getElementById('ollama-api-url').value;
-                // 获取选中的Ollama模型
-                const ollamaModelSelect = document.getElementById('ollama-model-select');
-                if (ollamaModelSelect) {
-                    config.selected_ollama_model = ollamaModelSelect.value;
-                }
-            }
-            // 在线API配置
-            else {
-                config.online_api_url = document.getElementById('online-api-url').value;
-                config.online_api_key = document.getElementById('online-api-key').value;
-                config.online_api_model = document.getElementById('online-model-name').value;
-            }
-
-            // 分析模型配置
-            const analysisModelValue = document.querySelector('input[name="analysis-model"]:checked').value;
-            config.analysis_model_name = analysisModelValue;
-
-            if (analysisModelValue === 'custom') {
-                config.analysis_custom_type = document.querySelector('input[name="analysis-custom-type"]:checked').value;
-
-                if (config.analysis_custom_type === 'ollama') {
-                    config.analysis_custom_ollama_model = document.getElementById('analysis-ollama-model-select').value;
-                } else {
-                    config.analysis_custom_online_model = document.getElementById('analysis-online-model-name').value;
-                }
-            }
-
-            // 写作模型配置
-            const writingModelValue = document.querySelector('input[name="writing-model"]:checked').value;
-            config.writing_model_name = writingModelValue;
-
-            if (writingModelValue === 'custom') {
-                config.writing_custom_type = document.querySelector('input[name="writing-custom-type"]:checked').value;
-
-                if (config.writing_custom_type === 'ollama') {
-                    config.writing_custom_ollama_model = document.getElementById('writing-ollama-model-select').value;
-                } else {
-                    config.writing_custom_online_model = document.getElementById('writing-online-model-name').value;
-                }
-            }
-
-            // 发送配置到服务器
-            fetch('/api/update_api_config', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(config)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    // 更新主页卡片上的模型显示
-                    const analysisModelDisplay = document.querySelector('.model-info:nth-child(1) .model-value');
-                    const writingModelDisplay = document.querySelector('.model-info:nth-child(2) .model-value');
-
-                    if (analysisModelDisplay) {
-                        analysisModelDisplay.textContent = config.analysis_model_name;
-                    }
-
-                    if (writingModelDisplay) {
-                        writingModelDisplay.textContent = config.writing_model_name;
-                    }
-
-                    alert('API配置已保存');
-                } else {
-                    alert('保存API配置失败: ' + data.error);
-                }
-            })
-            .catch(error => {
-                alert('保存API配置出错: ' + error);
-            });
+            // 不再处理保存逻辑，由悬浮保存按钮负责
         });
     }
 
@@ -528,22 +446,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     // 添加初始叙事到历史
                     const narrativeHistory = document.getElementById('narrative-history');
-                    narrativeHistory.innerHTML = ''; // Clear existing messages
-
-                    data.narrative_messages.forEach(item => { // data.narrative_messages is the new key
-                        const speaker = item[0];
-                        const messageContent = item[1];
-                        
-                        const messageContainer = document.createElement('div');
-                        messageContainer.classList.add('message-container');
-                        if (speaker === '用户') {
-                            messageContainer.classList.add('user-message');
-                        } else {
-                            messageContainer.classList.add('ai-message');
-                        }
-                        messageContainer.innerHTML = `<strong>${speaker}:</strong><p>${messageContent}</p>`;
-                        narrativeHistory.appendChild(messageContainer);
-                    });
+                    const messageContainer = document.createElement('div');
+                    messageContainer.className = 'message-container ai-message';
+                    messageContainer.innerHTML = `<strong>系统:</strong><p>${data.initial_narrative}</p>`;
+                    narrativeHistory.appendChild(messageContainer);
                     
                     // 滚动到底部
                     narrativeHistory.scrollTop = narrativeHistory.scrollHeight;
@@ -608,7 +514,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     // 添加系统响应到历史
                     const aiMessageContainer = document.createElement('div');
                     aiMessageContainer.className = 'message-container ai-message';
-                    aiMessageContainer.innerHTML = `<strong>AI:</strong><p>${data.response}</p>`;
+                    aiMessageContainer.innerHTML = `<strong>系统:</strong><p>${data.response}</p>`;
                     narrativeHistory.appendChild(aiMessageContainer);
                     
                     // 滚动到底部
