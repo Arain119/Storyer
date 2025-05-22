@@ -668,7 +668,7 @@ def start_narrative():
                 speaker = "用户" if entry.get("role") == "user" else ("系统" if entry.get("role") == "system" else "AI")
                 app_state["narrative_history_display"].append((speaker, entry.get("content", "")))
 
-        return jsonify({'success': True, 'narrative_messages': app_state["narrative_history_display"]})
+        return jsonify({'success': True, 'initial_narrative': initial_or_resumed_narrative})
     else:
         error_msg = "初始化/恢复叙事会话失败。"
         if hasattr(app_state["narrative_engine"], 'last_error') and app_state["narrative_engine"].last_error:
