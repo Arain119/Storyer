@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>交互式"穿书"小说体验</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/floating-save-button.css') }}">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&display=swap">
 </head>
@@ -171,7 +172,12 @@
                     <div class="narrative-card">
                         <h2 class="card-title">您的"穿书"之旅</h2>
                         <div class="narrative-history" id="narrative-history">
-                            <!-- Messages will be populated by JavaScript -->
+                            {% for speaker, text in app_state.narrative_history_display %}
+                                <div class="message-container {{ 'user-message' if speaker == '用户' else 'ai-message' }}">
+                                    <strong>{{ speaker }}:</strong>
+                                    <p>{{ text }}</p>
+                                </div>
+                            {% endfor %}
                         </div>
                         <div class="form-group">
                             <label class="form-label">您的行动</label>
@@ -251,7 +257,7 @@
                                 </div>
                             </div>
                             
-                            <button type="submit" class="btn btn-primary">保存配置</button>
+                            <!-- 保存配置按钮已移除，使用右下角悬浮按钮保存 -->
                         </form>
                     </div>
 
@@ -480,6 +486,20 @@
         </div>
     </div>
 
+    <!-- 悬浮保存按钮 -->
+    <div class="floating-save-button" id="global-save-button">
+        <i class="fas fa-save save-icon"></i>
+        <div class="save-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+        </div>
+    </div>
+
+    <!-- 保存成功提示 -->
+    <div class="save-toast" id="save-toast">
+        <i class="fas fa-check-circle"></i> 全局设置已保存
+    </div>
+
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/floating-save-button.js') }}"></script>
 </body>
 </html>
