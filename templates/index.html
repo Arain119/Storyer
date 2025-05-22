@@ -171,12 +171,7 @@
                     <div class="narrative-card">
                         <h2 class="card-title">您的"穿书"之旅</h2>
                         <div class="narrative-history" id="narrative-history">
-                            {% for speaker, text in app_state.narrative_history_display %}
-                                <div class="message-container {{ 'user-message' if speaker == '用户' else 'ai-message' }}">
-                                    <strong>{{ speaker }}:</strong>
-                                    <p>{{ text }}</p>
-                                </div>
-                            {% endfor %}
+                            <!-- Messages will be populated by JavaScript -->
                         </div>
                         <div class="form-group">
                             <label class="form-label">您的行动</label>
