@@ -927,6 +927,8 @@ def delete_history_route():
 def load_history_route():  # 从历史记录加载
     data = request.json
     file_path = data.get('file_path', '')
+    direct_to_narrative = data.get('direct_to_narrative', False)  # 新增参数，控制是否直接进入故事页面
+    
     if not file_path or not os.path.exists(file_path):
         return jsonify({'success': False, 'error': '历史对话文件路径无效或文件不存在。'})
     try:
@@ -997,6 +999,36 @@ def load_history_route():  # 从历史记录加载
                 app_state["app_stage"] = "resuming_narrative"
                 app_state["is_resuming_flag"] = True
                 print("App stage set to resuming_narrative from history load.")
+                
+                # 如果请求直接进入故事页面，则初始化叙事引擎并返回对话历史
+                if direct_to_narrative:
+                    # 初始化叙事引擎
+                    app_state["narrative_engine"] = NarrativeEngine(
+                        llm_client=app_state["llm_client"],
+                        novel_data_dir=app_state["novel_data_dir"],
+                        chapters_dir=app_state["chapters_dir"],
+                        analysis_path=app_state["analysis_path"],
+                        model_name=app_state["llm_client"].default_model,
+                        saved_state=app_state["engine_state_to_load"]
+                    )
+                    
+                    # 设置应用状态为叙事中
+                    app_state["app_stage"] = "narrating"
+                    
+                    # 构建UI显示的历史对话
+                    app_state["narrative_history_display"] = []
+                    if hasattr(app_state["narrative_engine"], 'conversation_history'):
+                        for entry in app_state["narrative_engine"].conversation_history:
+                            speaker = "用户" if entry.get("role") == "user" else ("系统" if entry.get("role") == "system" else "AI")
+                            app_state["narrative_history_display"].append((speaker, entry.get("content", "")))
+                    
+                    # 返回对话历史以便前端直接渲染
+                    return jsonify({
+                        'success': True, 
+                        'direct_narrative': True,
+                        'conversation_history': app_state["narrative_history_display"],
+                        'message': '历史对话已加载，已直接进入故事页面。'
+                    })
             else:  # 没有有效引擎状态可恢复，则回到新小说配置阶段
                 app_state["app_stage"] = "config_novel"  # 或者 initializing_narrative 如果小说信息已加载
                 app_state["is_resuming_flag"] = False
