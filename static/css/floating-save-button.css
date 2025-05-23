@@ -1,0 +1,86 @@
+/* 悬浮保存按钮样式 */
+.floating-save-button {
+  position: fixed;
+  bottom: 30px;
+  right: 30px;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background-color: var(--primary-color);
+  color: white;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  z-index: 1000;
+  transition: all 0.3s ease;
+}
+
+.floating-save-button:hover {
+  background-color: #b39b6d;
+  transform: translateY(-3px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+}
+
+.floating-save-button i {
+  font-size: 24px;
+}
+
+.floating-save-button.saving {
+  pointer-events: none;
+  opacity: 0.8;
+}
+
+.floating-save-button .save-spinner {
+  display: none;
+}
+
+.floating-save-button.saving .save-icon {
+  display: none;
+}
+
+.floating-save-button.saving .save-spinner {
+  display: inline-block;
+}
+
+/* 保存成功提示 */
+.save-toast {
+  position: fixed;
+  bottom: 100px;
+  right: 30px;
+  padding: 12px 20px;
+  background-color: var(--success-color);
+  color: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  z-index: 1001;
+  opacity: 0;
+  transform: translateY(20px);
+  transition: all 0.3s ease;
+  pointer-events: none;
+}
+
+.save-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .floating-save-button {
+    bottom: 20px;
+    right: 20px;
+    width: 50px;
+    height: 50px;
+  }
+  
+  .floating-save-button i {
+    font-size: 20px;
+  }
+  
+  .save-toast {
+    bottom: 80px;
+    right: 20px;
+  }
+}
