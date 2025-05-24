@@ -44,7 +44,7 @@ app_state = {
     
     "temperature": 0.7,
     "top_p": 0.9,
-    "max_tokens": 1024,
+    "max_tokens": 65536,
     "frequency_penalty": 0.0,
     "presence_penalty": 0.0,
     

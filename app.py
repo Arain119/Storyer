@@ -99,7 +99,7 @@ def init_app_state():
 
     app_state["temperature"] = api_config.get("temperature", 0.7)
     app_state["top_p"] = api_config.get("top_p", 0.9)
-    app_state["max_tokens"] = api_config.get("max_tokens", 1024)
+    app_state["max_tokens"] = api_config.get("max_tokens", 65536)
     app_state["frequency_penalty"] = api_config.get("frequency_penalty", 0.0)
     app_state["presence_penalty"] = api_config.get("presence_penalty", 0.0)
 
