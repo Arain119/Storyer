@@ -139,27 +139,23 @@
                     </div>
                 </div>
 
-                <!-- 叙事视图 - 直接在主内容区显示，不再使用弹窗 -->
+                <!-- 叙事视图 - 扁平化结构 -->
                 <div class="narrative-view" id="narrative-view" style="display: {{ 'block' if app_state.app_stage == 'narrating' else 'none' }}">
-                    <div class="narrative-container">
-                        <h2 class="narrative-title">您的"穿书"之旅</h2>
-                        <div class="narrative-history" id="narrative-history">
-                            {% for speaker, text in app_state.narrative_history_display %}
-                                <div class="message-container {{ 'user-message' if speaker == '用户' else 'ai-message' }}">
-                                    <strong>{{ speaker }}:</strong>
-                                    <p>{{ text }}</p>
-                                </div>
-                            {% endfor %}
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">您的行动</label>
-                            <textarea class="form-control" id="user-action" rows="3" placeholder="描述您想要在故事中采取的行动..."></textarea>
-                        </div>
-                        <div class="action-buttons">
-                            <button id="send-action-btn" class="btn btn-primary">发送</button>
-                            <button id="save-game-btn" class="btn">保存游戏</button>
-                            <button id="close-narrative-btn" class="btn">返回主页</button>
-                        </div>
+                    <h2 class="narrative-title">您的"穿书"之旅</h2>
+                    <div class="narrative-history" id="narrative-history">
+                        {% for speaker, text in app_state.narrative_history_display %}
+                            <div class="message-container {{ 'user-message' if speaker == '用户' else 'ai-message' }}">
+                                <strong>{{ speaker }}:</strong>
+                                <p>{{ text }}</p>
+                            </div>
+                        {% endfor %}
+                    </div>
+                    <label class="form-label">您的行动</label>
+                    <textarea class="form-control" id="user-action" rows="3" placeholder="描述您想要在故事中采取的行动..."></textarea>
+                    <div class="action-buttons">
+                        <button id="send-action-btn" class="btn btn-primary">发送</button>
+                        <button id="save-game-btn" class="btn">保存游戏</button>
+                        <button id="close-narrative-btn" class="btn">返回主页</button>
                     </div>
                 </div>
 
@@ -195,31 +191,27 @@
                 </div>
             </div>
 
-            <!-- 聊天历史部分 -->
+            <!-- 聊天历史部分 - 扁平化结构 -->
             <div id="chat-section" class="content-section" style="display: none;">
-                <div class="card">
-                    <h2 class="sub-title">历史对话</h2>
-                    <div class="chat-history-list">
-                        {% for history in app_state.history_conversations %}
-                            <div class="chat-history-item" data-path="{{ history.file_path }}">
-                                <div class="chat-history-item-content">
-                                    <div class="chat-history-item-title">{{ history.metadata.novel_title }}</div>
-                                    <div class="chat-history-item-date">{{ history.metadata.timestamp_readable }}</div>
-                                    <div class="chat-history-item-preview">{{ history.preview }}</div>
-                                </div>
-                                <div class="chat-history-item-actions">
-                                    <button class="btn btn-small load-chat-btn" data-path="{{ history.file_path }}">加载</button>
-                                    <button class="btn btn-small delete-chat-btn" data-path="{{ history.file_path }}">删除</button>
-                                </div>
+                <h2 class="sub-title">历史对话</h2>
+                <div class="chat-history-list">
+                    {% for history in app_state.history_conversations %}
+                        <div class="chat-history-item" data-path="{{ history.file_path }}">
+                            <div class="chat-history-item-title">{{ history.metadata.novel_name }}</div>
+                            <div class="chat-history-item-date">{{ history.metadata.timestamp_readable }}</div>
+                            <div class="chat-history-item-preview">{{ history.preview }}</div>
+                            <div class="chat-history-item-actions">
+                                <button class="btn btn-small load-chat-btn" data-path="{{ history.file_path }}">加载</button>
+                                <button class="btn btn-small delete-chat-btn" data-path="{{ history.file_path }}">删除</button>
                             </div>
-                        {% endfor %}
-                    </div>
-                    {% if not app_state.history_conversations %}
-                        <div class="empty-state">
-                            <p>暂无历史对话记录</p>
                         </div>
-                    {% endif %}
+                    {% endfor %}
                 </div>
+                {% if not app_state.history_conversations %}
+                    <div class="empty-state">
+                        <p>暂无历史对话记录</p>
+                    </div>
+                {% endif %}
             </div>
 
             <!-- API配置部分 -->
@@ -435,7 +427,7 @@
                         </div>
                         <div class="form-group">
                             <label class="form-label">最大生成长度</label>
-                            <input type="number" class="form-control" id="max-tokens" value="{{ app_state.max_tokens }}" min="100" max="4096">
+                            <input type="number" class="form-control" id="max-tokens" value="{{ app_state.max_tokens }}" min="100">
                         </div>
                         <div class="form-group">
                             <div class="checkbox-group">
@@ -468,8 +460,22 @@
                 </div>
             </div>
         </div>
+
+    <!-- 悬浮保存按钮 -->
+    <div class="floating-save-button" id="global-save-button">
+        <i class="fas fa-save save-icon"></i>
+        <div class="save-spinner">
+            <div class="loading"><div></div><div></div><div></div><div></div></div>
+        </div>
     </div>
+
+    <!-- 保存成功提示 -->
+    <div class="save-toast" id="save-toast">
+        <i class="fas fa-check-circle"></i> 设置已保存
+    </div>
+
+    <!-- JavaScript -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/floating-save-button.js') }}"></script>
 </body>
-<script src="{{ url_for('static', filename='js/main.js') }}"></script>
-<script src="{{ url_for('static', filename='js/floating-save-button.js') }}"></script>
 </html>
